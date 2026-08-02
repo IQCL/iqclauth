@@ -1,0 +1,68 @@
+/*
+ * Copyright (c) 2026 IQCL
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+
+plugins {
+    id 'fabric-loom' version '1.6-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Minecraft + Fabric
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // BouncyCastle — 加密库（RSA-OAEP 与 Ed25519）
+    // jdk18on 表示 Java 1.8 及以上可用（含 Minecraft 1.20.1 所需的 Java 17）
+    implementation "org.bouncycastle:bcprov-jdk18on:${project.bouncycastle_version}"
+    // include 将 BC 打包进 mod jar 的 META-INF/jars，运行时由 Fabric Loader 自动加载
+    include "org.bouncycastle:bcprov-jdk18on:${project.bouncycastle_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+// 强制使用 UTF-8 编码读取源文件（系统默认可能是 GBK，会导致中文注释编译失败）
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+}
+
+compileJava {
+    options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.archivesBaseName}" }
+    }
+}
+
+// —— fabric.mod.json 中 ${version} 由 processResources 替换 ——

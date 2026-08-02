@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "iqclauth",
+  "version": "${version}",
+  "name": "IQCL Auth",
+  "description": "Fabric 双端模组：客户端 RSA-OAEP 加密 PIN、服务端透明转发至远程验证服务器并执行 Ed25519 验签。PIN 明文永不离开客户端。",
+  "authors": [
+    "IQCL"
+  ],
+ "contact": {
+  "repo": "https://github.com/IQCL/iqclauth",
+  "issues": "https://github.com/IQCL/iqclauth/issues",
+  "homepage": "https://www.iqcl.de5.net"
+  },
+  "license": "MPL-2.0",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.iqcl.auth.IqclAuth"
+    ],
+    "client": [
+      "com.iqcl.auth.client.IqclAuthClient"
+    ]
+  },
+  "mixins": [],
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "fabric-api": "*",
+    "fabric-networking-api-v1": "*"
+  }
+}

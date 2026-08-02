@@ -1,0 +1,165 @@
+/*
+ * Copyright (c) 2026 IQCL
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+package com.iqcl.auth.client;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.iqcl.auth.IqclAuth;
+import com.iqcl.auth.crypto.Base64Utils;
+import com.iqcl.auth.crypto.HexNonceGenerator;
+import com.iqcl.auth.crypto.RsaOaepEncryptor;
+import com.iqcl.auth.network.NetworkConstants;
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.network.PacketByteBuf;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 聊天指令拦截器（仅客户端）。
+ * <p>
+ * 【核心安全点】
+ * 拦截玩家输入的 {@code /iqcl login pin <pin>} 指令，本地完成 RSA-OAEP 加密后
+ * 通过 Fabric 自定义数据包发送密文，<b>取消向 MC 服务端发送明文聊天/指令文本</b>，
+ * 从根本上杜绝 PIN 明文出现在服务端日志或网络流量中。
+ * <p>
+ * 同时注册 ALLOW_COMMAND（命令路径，无前导 /）与 ALLOW_CHAT（聊天路径，含前导 /）双重拦截，
+ * 确保任何路径下 PIN 明文都不外泄。
+ */
+public final class PinChatInterceptor {
+
+    /** 命令路径匹配（无前导 /）：iqcl login pin <pin> */
+    private static final Pattern PIN_COMMAND =
+            Pattern.compile("^iqcl\\s+login\\s+pin\\s+(\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
+
+    /** 聊天路径匹配（含前导 /）：/iqcl login pin <pin>，作为防御性兜底 */
+    private static final Pattern PIN_CHAT =
+            Pattern.compile("^/iqcl\\s+login\\s+pin\\s+(\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
+
+    private static final Gson GSON = new Gson();
+
+    private PinChatInterceptor() {
+    }
+
+    /** 注册拦截器。 */
+    public static void register() {
+        // 命令路径：/iqcl login pin <pin>  →  ALLOW_COMMAND 事件，message 不含前导 /
+        ClientSendMessageEvents.ALLOW_COMMAND.register(PinChatInterceptor::onCommand);
+        // 聊天路径兜底：若某些情况下以聊天消息形式发送 /iqcl ...
+        ClientSendMessageEvents.ALLOW_CHAT.register(PinChatInterceptor::onChat);
+    }
+
+    private static boolean onCommand(String command) {
+        Matcher m = PIN_COMMAND.matcher(command);
+        if (!m.matches()) {
+            return true; // 非本模组指令，放行
+        }
+        return handlePin(m.group(1));
+    }
+
+    private static boolean onChat(String message) {
+        Matcher m = PIN_CHAT.matcher(message);
+        if (!m.matches()) {
+            return true; // 非本模组指令，放行
+        }
+        return handlePin(m.group(1));
+    }
+
+    /**
+     * 核心：本地 RSA 加密 PIN，通过自定义数据包发送密文，取消明文发送。
+     *
+     * @return 固定返回 false（取消原始消息发送）
+     */
+    private static boolean handlePin(String pin) {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null) {
+            return false;
+        }
+
+        // 检查与服务端的模组通道是否可用
+        if (!ClientPlayNetworking.canSend(NetworkConstants.C2S_VERIFY_ID)) {
+            displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法验证 PIN");
+            return false;
+        }
+
+        try {
+            // 1. 获取玩家标准带横杠 UUID
+            String bindTarget;
+            if (player.getUuid() == null) {
+                displayResult(false, "无法获取玩家 UUID");
+                return false;
+            }
+            bindTarget = player.getUuid().toString();
+
+            // 2. 构造待加密明文 JSON
+            //    {"pin":"<pin>","bindTarget":"<uuid-with-dashes>"}
+            JsonObject plaintext = new JsonObject();
+            plaintext.addProperty("pin", pin);
+            plaintext.addProperty("bindTarget", bindTarget);
+            String plaintextJson = GSON.toJson(plaintext);
+
+            // 3. RSA-OAEP-2048 SHA-256 加密（纯非对称，无对称加密）
+            //    【安全】PIN 明文在此处加密后即不再以明文形态存在
+            byte[] cipherBytes = RsaOaepEncryptor.encrypt(
+                    plaintextJson.getBytes(StandardCharsets.UTF_8));
+
+            // 4. 组装上行请求包
+            //    {"v":1,"ts":<UTC毫秒>,"nonce":"<32hex>","ciphertext":"<base64>"}
+            JsonObject packet = new JsonObject();
+            packet.addProperty("v", 1);
+            packet.addProperty("ts", Instant.now().toEpochMilli());
+            packet.addProperty("nonce", HexNonceGenerator.generate32Hex());
+            packet.addProperty("ciphertext", Base64Utils.encode(cipherBytes));
+
+            String packetJson = GSON.toJson(packet);
+
+            // 5. 通过自定义数据包发送密文包至 MC 服务端
+            //    【安全】此处仅发送密文，PIN 明文永不离开客户端
+            PacketByteBuf buf = PacketByteBufs.create();
+            buf.writeString(packetJson);
+            ClientPlayNetworking.send(NetworkConstants.C2S_VERIFY_ID, buf);
+
+            displayProgress();
+        } catch (Exception e) {
+            IqclAuth.LOGGER.error("PIN 加密/发送失败", e);
+            displayResult(false, "加密发送失败: " + e.getMessage());
+        }
+
+        // 【关键安全点】无论成功与否，均取消原始明文指令发送
+        return false;
+    }
+
+    /** 显示"验证中"提示。 */
+    private static void displayProgress() {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player != null) {
+            player.sendMessage(
+                    Text.literal("[IQCL] 正在验证 PIN...").formatted(Formatting.YELLOW),
+                    false);
+        }
+    }
+
+    /** 在客户端聊天框展示最终结果。 */
+    public static void displayResult(boolean success, String message) {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player != null) {
+            Formatting color = success ? Formatting.GREEN : Formatting.RED;
+            player.sendMessage(
+                    Text.literal("[IQCL] " + message).formatted(color),
+                    false);
+        }
+    }
+}

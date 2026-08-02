@@ -22,7 +22,8 @@ import java.nio.file.Path;
  * 使用 FabricLoader 的 config 目录，JSON 格式存储。
  * 配置文件位于 {@code config/iqclauth.json}，首次启动自动生成。
  * <p>
- * 仅服务端使用（含内置服务端）：存放验证服务器 API 地址与 X-Server-Key。
+ * 仅服务端使用（含内置服务端）：存放 X-Server-Key。
+ * 验证服务器 API 地址为硬编码常量，不可修改。
  */
 public class ModConfig {
 
@@ -30,8 +31,12 @@ public class ModConfig {
     private static final Path CONFIG_PATH =
             FabricLoader.getInstance().getConfigDir().resolve("iqclauth.json");
 
-    /** 远程验证服务器 API 地址（POST /api/verify-pin）。 */
-    public String verifyApiUrl = "https://your-verify-server.example.com/api/verify-pin";
+    /**
+     * 远程验证服务器 API 地址（POST /api/verify-pin）。
+     * <p>
+     * 【硬编码常量】禁止修改，防止被篡改指向恶意服务器。
+     */
+    public static final String VERIFY_API_URL = "https://www.iqcl.de5.net/api/verify-pin";
 
     /** 服务端身份密钥，作为 X-Server-Key 请求头发送给验证服务器。 */
     public String serverKey = "REPLACE_WITH_YOUR_X_SERVER_KEY";

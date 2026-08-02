@@ -94,8 +94,9 @@ public final class ServerNetworkHandler {
 
             // —— 1. 透明转发：原样发送客户端密文包 ——
             // 【安全】服务端不解密、不查看 ciphertext 内容，仅作为 HTTP 中转
+            // API 地址为硬编码常量，防止被篡改指向恶意服务器
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(config.verifyApiUrl))
+                    .uri(URI.create(ModConfig.VERIFY_API_URL))
                     .header("Content-Type", "application/json")
                     .header("X-Server-Key", config.serverKey)
                     .POST(HttpRequest.BodyPublishers.ofString(packetJson, StandardCharsets.UTF_8))

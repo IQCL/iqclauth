@@ -124,7 +124,7 @@ gradlew.bat build
 }
 ```
 
-修改为实际值后重启服务端：
+修改为实际值(如果你使用iqcl的登录服务，就填入https://www.iqcl.de5.net/api/verify-pin)后重启服务端：
 
 | 字段 | 说明 |
 |---|---|

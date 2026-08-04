@@ -75,9 +75,9 @@ iqclauth/
 - **JDK 17+**（Minecraft 1.20.1 最低要求，实测 JDK 21 可用）
 - **Gradle 8.6+**（或使用项目 wrapper）
 
-### 生成 Gradle Wrapper（首次）
+### 生成 Gradle Wrapper（非必要）
 
-项目未附带 `gradle-wrapper.jar`（二进制文件）。若系统已安装 Gradle：
+项目附带 `gradle-wrapper.jar`（二进制文件）。若损坏请重新初始化。
 
 ```bash
 cd f:\iqclauth

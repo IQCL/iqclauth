@@ -1,0 +1,10 @@
+{
+  "modmenu.nameTranslation.iqclauth": "IQCL 身份验证",
+  "modmenu.descriptionTranslation.iqclauth": "Fabric 双端模组：客户端 RSA-OAEP 加密 PIN、服务端透明转发至远程验证服务器并执行 Ed25519 验签。",
+  "iqclauth.auth.success": "PIN 验证成功，登录已放行",
+  "iqclauth.auth.fail": "PIN 验证失败",
+  "iqclauth.auth.verify": "正在验证 PIN...",
+  "iqclauth.auth.blocked": "你尚未登录，无法执行此操作",
+  "iqclauth.auth.kick": "登录超时，请重新输入 PIN",
+  "iqclauth.auth.pin_invalid": "PIN 格式无效，应为 ABCD-EFGH-JKLM 格式（12 位大写字母数字+连字符）"
+}

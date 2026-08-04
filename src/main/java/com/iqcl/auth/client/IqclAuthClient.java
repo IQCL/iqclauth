@@ -40,8 +40,23 @@ public class IqclAuthClient implements ClientModInitializer {
                 (client, handler, buf, responseSender) -> {
                     boolean success = buf.readBoolean();
                     String message = buf.readString();
-                    // 切回客户端主线程更新 UI
                     client.execute(() -> PinChatInterceptor.displayResult(success, message));
+                });
+
+        // 注册服务端 → 客户端登出通知接收器
+        ClientPlayNetworking.registerGlobalReceiver(
+                NetworkConstants.S2C_LOGOUT_ID,
+                (client, handler, buf, responseSender) -> {
+                    client.execute(() -> {
+                        PinChatInterceptor.resetAuth();
+                        MinecraftClient mc = MinecraftClient.getInstance();
+                        if (mc.player != null) {
+                            mc.player.sendMessage(
+                                    net.minecraft.text.Text.literal("[IQCL] 已登出，请重新登录")
+                                            .formatted(net.minecraft.util.Formatting.GRAY),
+                                    false);
+                        }
+                    });
                 });
 
         IqclAuth.LOGGER.info("[IQCL Auth] 客户端初始化完成");

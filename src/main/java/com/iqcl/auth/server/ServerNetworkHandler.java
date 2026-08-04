@@ -38,7 +38,7 @@ import java.util.concurrent.Executors;
  * <ol>
  *   <li>接收客户端 C2S 密文数据包（<b>不解密 ciphertext</b>，MC 服务端无 RSA 私钥）；</li>
  *   <li>异步 POST 转发完整密文包至远程验证服务器
- *       （Content-Type: application/json，X-Server-Key: &lt;配置&gt;，body = 原始密文包 JSON）；</li>
+ *       （Content-Type: application/json，X-Server-Key: <配置>，body = 原始密文包 JSON）；</li>
  *   <li>接收验证服务器返回的 Ed25519 签名响应；</li>
  *   <li>对 payload 执行规范化 JSON 序列化后验证 Ed25519 签名；</li>
  *   <li>验签失败 → 直接判定登录失败；验签成功 → 检查 payload.permission，banned 拒绝；</li>
@@ -47,54 +47,61 @@ import java.util.concurrent.Executors;
  * <p>
  * HTTP 请求在独立线程池执行，避免阻塞服务端主线程；
  * 回传数据包时调度回服务端主线程以保证线程安全。
- * <p>
- * Fabric 1.20.1 Networking API v1：使用 {@code PlayChannelHandler} + {@code PacketByteBuf}。
  */
 public final class ServerNetworkHandler {
 
-    /** HTTP 客户端（连接超时 10s）。 */
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
-    /** 验签请求工作线程池（守护线程，单线程足够，登录非高频操作）。 */
     private static final ExecutorService VERIFY_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "IQCL-Verify-Worker");
         t.setDaemon(true);
+        t.setUncaughtExceptionHandler((thread, throwable) ->
+                IqclAuth.LOGGER.error("[IQCL Auth] 验签工作线程未捕获异常", throwable));
         return t;
     });
 
     private ServerNetworkHandler() {
     }
 
-    /** 注册服务端 C2S 接收器。在 main entrypoint 调用，内置/专用服务端均生效。 */
     public static void register() {
+        try {
+            Ed25519Verifier.warmup();
+            IqclAuth.LOGGER.info("[IQCL Auth] Ed25519 验签器初始化成功");
+        } catch (Throwable t) {
+            IqclAuth.LOGGER.error("[IQCL Auth] Ed25519 验签器初始化失败，PIN 验证将无法工作", t);
+        }
+
         ServerPlayNetworking.registerGlobalReceiver(
                 NetworkConstants.C2S_VERIFY_ID,
                 (server, player, handler, buf, responseSender) -> {
-                    // 读取客户端发来的完整密文包 JSON
                     String packetJson = buf.readString();
-
-                    IqclAuth.LOGGER.info("[IQCL Auth] 收到玩家 {} 的 PIN 验证请求，开始异步转发",
-                            player.getEntityName());
-
-                    // 异步执行 HTTP 转发 + 验签，避免阻塞服务端主线程
+                    String pName = player.getEntityName();
+                    IqclAuth.LOGGER.info("[IQCL Auth] 收到玩家 {} 的 PIN 验证请求", pName);
                     VERIFY_EXECUTOR.submit(() -> processVerify(player, server, packetJson));
                 });
     }
 
-    /**
-     * 处理一次完整的验证流程：转发 → 验签 → 权限检查。
-     * 运行在工作线程，最后通过 server.execute 切回主线程发送结果。
-     */
     private static void processVerify(ServerPlayerEntity player, MinecraftServer server,
                                       String packetJson) {
+        String playerName = player.getEntityName();
         try {
+            IqclAuth.LOGGER.debug("[IQCL Auth] [{}] processVerify 开始处理", playerName);
+
+            // —— 服务端已认证检查：已登录玩家拒绝重复验证 ——
+            if (AuthState.isAuthenticated(player.getUuid())) {
+                IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 已认证，拒绝重复验证", playerName);
+                sendResult(server, player, false, "你已经登录成功，无需重复验证");
+                return;
+            }
+
             ModConfig config = ModConfig.get();
 
-            // —— 1. 透明转发：原样发送客户端密文包 ——
-            // 【安全】服务端不解密、不查看 ciphertext 内容，仅作为 HTTP 中转
-            // API 地址为硬编码常量，防止被篡改指向恶意服务器
+            // —— HTTP 请求转发 ——
+            IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 准备发送 HTTP 请求至 {}",
+                    playerName, ModConfig.VERIFY_API_URL);
+
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(ModConfig.VERIFY_API_URL))
                     .header("Content-Type", "application/json")
@@ -106,19 +113,20 @@ public final class ServerNetworkHandler {
             HttpResponse<String> response =
                     HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
+            IqclAuth.LOGGER.debug("[IQCL Auth] [{}] HTTP 响应: status={}, bodyLen={}",
+                    playerName, response.statusCode(),
+                    response.body() != null ? response.body().length() : 0);
+
             if (response.statusCode() != 200) {
-                IqclAuth.LOGGER.warn("[IQCL Auth] 验证服务器返回非 200 状态码: {}",
-                        response.statusCode());
                 sendResult(server, player, false, "验证服务器返回异常状态码: " + response.statusCode());
                 return;
             }
 
-            // —— 2. 解析验证服务器响应 ——
-            // 期望结构: {"success":bool,"serverTs":number,"payload":object,"signature":"base64"}
             JsonElement rootElement;
             try {
                 rootElement = JsonParser.parseString(response.body());
             } catch (Exception e) {
+                IqclAuth.LOGGER.warn("[IQCL Auth] [{}] 响应解析失败: {}", playerName, e.getMessage());
                 sendResult(server, player, false, "验证服务器响应解析失败");
                 return;
             }
@@ -128,18 +136,36 @@ public final class ServerNetworkHandler {
             }
             JsonObject resp = rootElement.getAsJsonObject();
 
-            boolean serverSuccess = resp.has("success") && resp.get("success").getAsBoolean();
-            String signature = resp.has("signature") ? resp.get("signature").getAsString() : "";
-
-            JsonObject payloadObj;
-            if (resp.has("payload") && resp.get("payload").isJsonObject()) {
-                payloadObj = resp.getAsJsonObject("payload");
-            } else {
-                payloadObj = new JsonObject();
+            // —— 按 API 文档严格校验必需字段 ——
+            if (!resp.has("success")) {
+                sendResult(server, player, false, "验证响应缺少 success 字段");
+                return;
             }
 
-            // —— 3. 规范化序列化 payload 并验证 Ed25519 签名 ——
-            // 【关键安全步骤】必须先 canonical JSON 再验签，不可跳过
+            boolean serverSuccess = resp.get("success").getAsBoolean();
+
+            // 失败响应：直接转发错误消息
+            if (!serverSuccess) {
+                String errMsg = resp.has("message") ? resp.get("message").getAsString() : "PIN 验证失败";
+                IqclAuth.LOGGER.info("[IQCL Auth] [{}] 验证失败: {}", playerName, errMsg);
+                sendResult(server, player, false, errMsg);
+                return;
+            }
+
+            // 成功响应：必须包含 payload 和 signature
+            if (!resp.has("payload") || !resp.get("payload").isJsonObject()) {
+                sendResult(server, player, false, "验证响应缺少 payload 字段");
+                return;
+            }
+            if (!resp.has("signature") || resp.get("signature").getAsString().isEmpty()) {
+                sendResult(server, player, false, "验证响应缺少 signature 字段");
+                return;
+            }
+
+            JsonObject payloadObj = resp.getAsJsonObject("payload");
+            String signature = resp.get("signature").getAsString();
+
+            // —— Ed25519 验签（强制，不可跳过）——
             String canonicalPayload = CanonicalJson.stringify(payloadObj);
             byte[] messageBytes = canonicalPayload.getBytes(StandardCharsets.UTF_8);
 
@@ -147,7 +173,6 @@ public final class ServerNetworkHandler {
             try {
                 sigBytes = Base64Utils.decode(signature);
             } catch (IllegalArgumentException e) {
-                IqclAuth.LOGGER.warn("[IQCL Auth] 签名 base64 解码失败");
                 sendResult(server, player, false, "签名格式错误");
                 return;
             }
@@ -155,23 +180,19 @@ public final class ServerNetworkHandler {
             boolean sigValid;
             try {
                 sigValid = Ed25519Verifier.verify(messageBytes, sigBytes);
-            } catch (Exception e) {
-                IqclAuth.LOGGER.error("[IQCL Auth] Ed25519 验签异常", e);
+            } catch (Throwable t) {
+                IqclAuth.LOGGER.error("[IQCL Auth] [{}] Ed25519 验签异常", playerName, t);
                 sendResult(server, player, false, "验签过程异常");
                 return;
             }
 
             if (!sigValid) {
-                // 【安全】验签失败 → 直接拒绝，不执行任何后续登录逻辑
-                IqclAuth.LOGGER.warn("[IQCL Auth] 玩家 {} 验签失败，拒绝登录",
-                        player.getEntityName());
+                IqclAuth.LOGGER.warn("[IQCL Auth] [{}] Ed25519 验签失败", playerName);
                 sendResult(server, player, false, "验签失败，拒绝登录");
                 return;
             }
 
-            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 验签通过", player.getEntityName());
-
-            // —— 4. 验签成功，检查 payload.permission ——
+            // —— payload.permission 检查 ——
             if (payloadObj.has("permission")) {
                 String permission = payloadObj.get("permission").getAsString();
                 if ("banned".equalsIgnoreCase(permission)) {
@@ -180,36 +201,132 @@ public final class ServerNetworkHandler {
                 }
             }
 
-            // —— 5. 综合判定 ——
-            if (!serverSuccess) {
-                sendResult(server, player, false, "PIN 验证失败");
+            // —— payload.mcUUID 回显核对 ——
+            if (payloadObj.has("mcUUID") && !payloadObj.get("mcUUID").isJsonNull()) {
+                String mcUUID = payloadObj.get("mcUUID").getAsString();
+                if (!mcUUID.equals(player.getUuid().toString())) {
+                    sendResult(server, player, false, "UUID 不匹配，拒绝登录");
+                    return;
+                }
+            }
+
+            // —— 提取账号信息 ——
+            Integer displayId = null;
+            String username = null;
+            String permission = null;
+            if (payloadObj.has("displayId") && !payloadObj.get("displayId").isJsonNull()) {
+                displayId = payloadObj.get("displayId").getAsInt();
+            }
+            if (payloadObj.has("username") && !payloadObj.get("username").isJsonNull()) {
+                username = payloadObj.get("username").getAsString();
+            }
+            if (payloadObj.has("permission")) {
+                permission = payloadObj.get("permission").getAsString();
+            }
+
+            IqclAuth.LOGGER.info("[IQCL Auth] [{}] PIN 验证通过，displayId={}, username={}",
+                    playerName, displayId, username);
+
+            // —— 强制账号关联检查 ——
+            if (config.requireLink && (displayId != null || username != null)) {
+                String displayLine = (displayId != null ? "ID: " + displayId : "");
+                String nameLine = (username != null ? "用户名: " + username : "");
+                String msg = "====================================\n"
+                        + "[IQCL] 检测到 IQCL 账号信息：\n"
+                        + "  " + displayLine + "\n"
+                        + "  " + nameLine + "\n"
+                        + "\n"
+                        + "确定要将此游戏账号与 IQCL 账号关联吗？\n"
+                        + "输入 /iqcl link 确认关联\n"
+                        + "================================";
+                final Integer finalDisplayId = displayId;
+                final String finalUsername = username;
+                final String finalPermission = permission;
+                // 调度到主线程：先记录认证状态（未关联，待 link），再发送提示
+                server.execute(() -> {
+                    AuthState.authenticateWithAccount(player, finalDisplayId, finalUsername, finalPermission);
+                    sendRawMessage(server, player, msg);
+                    sendResult(server, player, false, "请输入 /iqcl link 确认关联后完成登录");
+                });
+                IqclAuth.LOGGER.info("[IQCL Auth] [{}] 等待 /iqcl link 确认关联", playerName);
                 return;
             }
 
-            sendResult(server, player, true, "PIN 验证成功，登录已放行");
+            // —— 强制关联关闭或无账号信息，调度到主线程完成登录 ——
+            completeLogin(server, player, playerName, displayId, username);
 
-        } catch (Exception e) {
-            IqclAuth.LOGGER.error("[IQCL Auth] 验证请求处理失败", e);
-            sendResult(server, player, false, "验证请求处理失败: " + e.getMessage());
+        } catch (java.net.SocketTimeoutException ste) {
+            IqclAuth.LOGGER.error("[IQCL Auth] [{}] 验证请求超时", playerName);
+            sendResult(server, player, false, "验证服务器请求超时，请稍后重试");
+        } catch (java.net.ConnectException ce) {
+            IqclAuth.LOGGER.error("[IQCL Auth] [{}] 无法连接到验证服务器", playerName);
+            sendResult(server, player, false, "无法连接到验证服务器");
+        } catch (Throwable t) {
+            IqclAuth.LOGGER.error("[IQCL Auth] [{}] 验证请求处理失败", playerName, t);
+            sendResult(server, player, false, "验证请求处理失败: " + t.getMessage());
         }
     }
 
     /**
-     * 将结果调度到服务端主线程后发送 S2C 数据包。
-     * 工作线程不能直接操作网络处理器，需切回主线程保证线程安全。
+     * 完成登录流程（PIN 验证通过 + 账号关联完成后调用）。
+     * 所有状态修改调度到主线程执行。
      */
+    public static void completeLogin(MinecraftServer server, ServerPlayerEntity player,
+                                     String playerName, Integer displayId, String username) {
+        server.execute(() -> {
+            IqclAuth.LOGGER.debug("[IQCL Auth] [{}] completeLogin 开始执行", playerName);
+
+            // 防多开检查
+            if (displayId != null) {
+                ServerPlayerEntity kicked = PlayerSessionManager.enforceSingleAccount(player, displayId);
+                if (kicked != null) {
+                    IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 被踢：账号 {} 已在其他设备登录",
+                            kicked.getEntityName(), displayId);
+                }
+            }
+
+            // 标记认证
+            AuthState.authenticate(player);
+            PlayerSessionManager.recordAuthenticatedIp(player);
+
+            // 恢复物品/位置
+            PlayerSessionManager.restoreFromLimbo(player);
+
+            // 发送 game-session login
+            ApiGateway.notifyLogin(player.getUuid().toString(),
+                    username != null ? username : playerName);
+
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已通过 PIN 认证", playerName);
+            sendResult(server, player, true, "PIN 验证成功，登录已放行");
+        });
+    }
+
     private static void sendResult(MinecraftServer server, ServerPlayerEntity player,
                                    boolean success, String message) {
         server.execute(() -> {
-            // 检查玩家是否仍在线（HTTP 期间可能已下线）
             if (player.networkHandler != null && !player.isRemoved()) {
                 PacketByteBuf buf = PacketByteBufs.create();
                 buf.writeBoolean(success);
                 buf.writeString(message);
                 ServerPlayNetworking.send(player, NetworkConstants.S2C_RESULT_ID, buf);
             } else {
-                IqclAuth.LOGGER.debug("[IQCL Auth] 玩家 {} 已离线，跳过结果回传",
-                        player.getEntityName());
+                IqclAuth.LOGGER.warn("[IQCL Auth] [{}] sendResult 跳过: networkHandler={}, removed={}",
+                        player.getEntityName(),
+                        player.networkHandler != null,
+                        player.isRemoved());
+            }
+        });
+    }
+
+    /** 通过服务端主线程向玩家发送纯文本消息。 */
+    private static void sendRawMessage(MinecraftServer server, ServerPlayerEntity player,
+                                       String message) {
+        server.execute(() -> {
+            if (player.networkHandler != null && !player.isRemoved()) {
+                PacketByteBuf buf = PacketByteBufs.create();
+                buf.writeBoolean(true);
+                buf.writeString(message);
+                ServerPlayNetworking.send(player, NetworkConstants.S2C_RESULT_ID, buf);
             }
         });
     }

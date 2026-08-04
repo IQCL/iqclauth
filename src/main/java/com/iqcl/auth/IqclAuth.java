@@ -8,6 +8,8 @@
 package com.iqcl.auth;
 
 import com.iqcl.auth.config.ModConfig;
+import com.iqcl.auth.server.CommandRegistry;
+import com.iqcl.auth.server.PlayerRestrictionManager;
 import com.iqcl.auth.server.ServerNetworkHandler;
 import net.fabricmc.api.ModInitializer;
 import org.slf4j.Logger;
@@ -19,12 +21,10 @@ import org.slf4j.LoggerFactory;
  * 在客户端与服务端（含内置服务端）均执行：
  * <ul>
  *   <li>加载配置；</li>
- *   <li>注册服务端数据包接收器（处理客户端密文转发请求）。</li>
+ *   <li>注册指令（{@code /iqcl login pin <pin>} 补全等）；</li>
+ *   <li>注册服务端数据包接收器（处理客户端密文转发请求）；</li>
+ *   <li>注册玩家行为限制器（未登录限制移动/破坏 + 超时踢出）。</li>
  * </ul>
- * 客户端专属逻辑（聊天拦截、RSA 加密）在 client entrypoint 中初始化。
- * <p>
- * Fabric 1.20.1 使用基于 Identifier + PacketByteBuf 的旧版 Networking API v1，
- * 无需 PayloadTypeRegistry 注册。
  */
 public class IqclAuth implements ModInitializer {
 
@@ -35,11 +35,17 @@ public class IqclAuth implements ModInitializer {
     public void onInitialize() {
         LOGGER.info("[IQCL Auth] 初始化（公共/服务端侧）...");
 
-        // 加载服务端配置（验证服务器地址 + X-Server-Key）
+        // 加载服务端配置
         ModConfig.load();
 
-        // 注册服务端接收器：在专用服务端与内置服务端均生效
+        // 注册 /iqcl 指令（支持 Tab 补全，不限管理员）
+        CommandRegistry.register();
+
+        // 注册服务端数据包接收器（密文转发 + 验签）
         ServerNetworkHandler.register();
+
+        // 注册玩家行为限制器（未登录限制移动/破坏 + 超时踢出）
+        PlayerRestrictionManager.register();
 
         LOGGER.info("[IQCL Auth] 初始化完成");
     }

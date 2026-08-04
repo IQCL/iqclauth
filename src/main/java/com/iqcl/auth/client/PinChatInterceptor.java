@@ -41,6 +41,9 @@ import java.util.regex.Pattern;
  */
 public final class PinChatInterceptor {
 
+    /** 本地认证状态（客户端记录，防止重复登录请求）。 */
+    private static volatile boolean authenticated = false;
+
     /** 命令路径匹配（无前导 /）：iqcl login pin <pin> */
     private static final Pattern PIN_COMMAND =
             Pattern.compile("^iqcl\\s+login\\s+pin\\s+(\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
@@ -48,6 +51,14 @@ public final class PinChatInterceptor {
     /** 聊天路径匹配（含前导 /）：/iqcl login pin <pin>，作为防御性兜底 */
     private static final Pattern PIN_CHAT =
             Pattern.compile("^/iqcl\\s+login\\s+pin\\s+(\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * PIN 格式校验规则：
+     * 允许 4-4-4 格式，如 ABCD-EFGH-JKLM
+     * 也允许纯字母数字串（后端自行处理），最小 4 字符
+     */
+    private static final Pattern PIN_VALIDATION =
+            Pattern.compile("^[A-Za-z0-9-]{4,32}$");
 
     private static final Gson GSON = new Gson();
 
@@ -86,6 +97,21 @@ public final class PinChatInterceptor {
     private static boolean handlePin(String pin) {
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player == null) {
+            return false;
+        }
+
+        // —— 已登录检查：已认证玩家再次提交 PIN 直接拒绝 ——
+        if (authenticated) {
+            player.sendMessage(
+                    Text.literal("[IQCL] 你已经登录成功，无需重复验证")
+                            .formatted(Formatting.YELLOW),
+                    false);
+            return false;
+        }
+
+        // —— PIN 格式校验 ——
+        if (!PIN_VALIDATION.matcher(pin).matches()) {
+            displayResult(false, "PIN 格式无效，仅允许字母、数字和连字符，长度 4-32 字符");
             return false;
         }
 
@@ -154,6 +180,9 @@ public final class PinChatInterceptor {
 
     /** 在客户端聊天框展示最终结果。 */
     public static void displayResult(boolean success, String message) {
+        // 同步本地认证状态
+        authenticated = success;
+
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player != null) {
             Formatting color = success ? Formatting.GREEN : Formatting.RED;
@@ -161,5 +190,15 @@ public final class PinChatInterceptor {
                     Text.literal("[IQCL] " + message).formatted(color),
                     false);
         }
+    }
+
+    /** 是否已在客户端本地记录为已认证。 */
+    public static boolean isAuthenticated() {
+        return authenticated;
+    }
+
+    /** 重置本地认证状态（登出时调用）。 */
+    public static void resetAuth() {
+        authenticated = false;
     }
 }

@@ -7,10 +7,10 @@
   "authors": [
     "IQCL"
   ],
- "contact": {
-  "repo": "https://github.com/IQCL/iqclauth",
-  "issues": "https://github.com/IQCL/iqclauth/issues",
-  "homepage": "https://www.iqcl.de5.net"
+  "contact": {
+    "repo": "https://github.com/IQCL/iqclauth",
+    "issues": "https://github.com/IQCL/iqclauth/issues",
+    "homepage": "https://www.iqcl.de5.net"
   },
   "license": "MPL-2.0",
   "environment": "*",
@@ -28,6 +28,9 @@
     "minecraft": "~1.20.1",
     "java": ">=17",
     "fabric-api": "*",
-    "fabric-networking-api-v1": "*"
+    "fabric-networking-api-v1": "*",
+    "fabric-command-api-v2": "*",
+    "fabric-lifecycle-events-v1": "*",
+    "fabric-events-interaction-v0": "*"
   }
 }

@@ -26,4 +26,7 @@ public final class NetworkConstants {
 
     /** 服务端 → 客户端：返回最终验签结果（成功/失败 + 消息）。 */
     public static final Identifier S2C_RESULT_ID = new Identifier(MOD_ID, "s2c_result");
+
+    /** 服务端 → 客户端：通知客户端登出（重置本地认证状态）。 */
+    public static final Identifier S2C_LOGOUT_ID = new Identifier(MOD_ID, "s2c_logout");
 }

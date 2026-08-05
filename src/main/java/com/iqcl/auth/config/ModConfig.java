@@ -133,6 +133,13 @@ public class ModConfig {
      */
     public boolean trustIp = true;
 
+    /**
+     * 是否启用 IP 绑定检测（防异地登录）。
+     * true: 记录登录 IP，下次登录 IP 不一致时触发锁定
+     * false: 不检查 IP 变化
+     */
+    public boolean enableIpBinding = true;
+
     // ========== 单账号唯一在线 ==========
 
     /**

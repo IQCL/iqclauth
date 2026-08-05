@@ -11,6 +11,7 @@ import com.iqcl.auth.IqclAuth;
 import com.iqcl.auth.config.ModConfig;
 import com.iqcl.auth.network.NetworkConstants;
 import com.iqcl.auth.password.crypto.PasswordHasher;
+import com.iqcl.auth.password.crypto.TotpManager;
 import com.iqcl.auth.password.storage.AccountStorage;
 import com.iqcl.auth.password.storage.AccountStorageFactory;
 import com.iqcl.auth.password.storage.StorageExecutor;
@@ -112,6 +113,64 @@ public final class PasswordManager {
         }
     }
 
+    /**
+     * 确认 TOTP 验证完成登录（密码已通过后的第二步）。
+     */
+    public static void confirmTotpLogin(MinecraftServer server, ServerPlayerEntity player,
+                                        String code, Consumer<Result> callback) {
+        if (!checkAvailable(server, player, callback)) return;
+        java.util.UUID uuid = player.getUuid();
+        String playerName = player.getEntityName();
+
+        if (!AuthState.hasPendingTotp(uuid)) {
+            callback.accept(Result.fail("你当前没有待完成的 TOTP 验证"));
+            return;
+        }
+
+        StorageExecutor.submit(server, () -> {
+            try {
+                AccountRecord record = storage.findByUuid(uuid);
+                if (record == null) {
+                    return Result.fail("账号不存在");
+                }
+                if (!record.totpEnabled) {
+                    return Result.fail("你的账号未启用 TOTP");
+                }
+                boolean valid = TotpManager.verify(record.totpSecret, code, record.totpLastCode);
+                if (!valid) {
+                    LoginAttemptLimiter.recordFailure(uuid);
+                    int remaining = LoginAttemptLimiter.remainingAttempts(uuid);
+                    boolean locked = LoginAttemptLimiter.isLocked(uuid);
+                    if (locked) {
+                        long remainMs = LoginAttemptLimiter.remainingLockMs(uuid);
+                        return Result.failLocked(remainMs / 1000L);
+                    }
+                    return Result.failAccount(remaining);
+                }
+                // TOTP 通过
+                LoginAttemptLimiter.reset(uuid);
+                // 更新 lastCode 防重放
+                storage.updateTotpLastCode(uuid, code);
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} TOTP 验证通过", playerName);
+                return Result.okForLogin();
+            } catch (Exception e) {
+                IqclAuth.LOGGER.error("[IQCL Auth] 玩家 {} TOTP 验证异常", playerName, e);
+                return Result.fail("验证服务暂时不可用，请稍后再试");
+            }
+        }, result -> {
+            if (result.success && result.kind == Result.Kind.LOGIN_OK) {
+                AuthState.clearPendingTotp(uuid);
+                completePasswordLogin(server, player);
+            } else {
+                sendResult(player, false, result.message);
+            }
+            if (callback != null) callback.accept(result);
+        }, ex -> {
+            sendResult(player, false, "验证服务暂时不可用，请稍后再试");
+            if (callback != null) callback.accept(Result.fail("验证服务暂时不可用，请稍后再试"));
+        });
+    }
+
     // ========== 业务入口 ==========
 
     /**
@@ -128,6 +187,12 @@ public final class PasswordManager {
         }
         if (AuthState.hasPendingLink(player.getUuid())) {
             callback.accept(Result.fail("你正在 IQCL 关联确认中，请先 /iqcl link 或 /iqcl cancel"));
+            return;
+        }
+        // 会话锁定检查（异地登录后短时间内拒绝登录）
+        if (PlayerSessionManager.isSessionLocked(player.getUuid())) {
+            long remain = PlayerSessionManager.getLockRemainingSeconds(player.getUuid());
+            callback.accept(Result.fail("账号因异地登录已被临时锁定，请 " + remain + " 秒后再试"));
             return;
         }
         if (LoginAttemptLimiter.isLocked(player.getUuid())) {
@@ -161,9 +226,15 @@ public final class PasswordManager {
                     }
                     return Result.failAccount(remaining);
                 }
-                // 成功
+                // 密码成功 — 检查 TOTP
                 LoginAttemptLimiter.reset(uuid);
-                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 密码登录验证通过", playerName);
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 密码验证通过", playerName);
+
+                if (record.totpEnabled && record.totpSecret != null) {
+                    // 需要 TOTP 双因素认证
+                    return Result.okNeedTotp();
+                }
+                // 无需 TOTP — 直接完成
                 return Result.okForLogin();
             } catch (Exception e) {
                 IqclAuth.LOGGER.error("[IQCL Auth] 玩家 {} 密码登录存储异常", playerName, e);
@@ -175,6 +246,10 @@ public final class PasswordManager {
             // 主线程
             if (result.success && result.kind == Result.Kind.LOGIN_OK) {
                 completePasswordLogin(server, player);
+            } else if (result.success && result.kind == Result.Kind.NEED_TOTP) {
+                // 密码通过但需要 TOTP
+                AuthState.setPendingTotp(uuid, "password");
+                sendResult(player, false, "密码验证成功，请输入 TOTP 验证码: /iqcl login confirmtotp <6位验证码>");
             } else {
                 sendResult(player, false, result.message);
             }
@@ -450,6 +525,16 @@ public final class PasswordManager {
             String playerName = player.getEntityName();
             java.util.UUID uuid = player.getUuid();
 
+            // 异地登录检测
+            if (PlayerSessionManager.isCrossIpLogin(player)) {
+                PlayerSessionManager.lockSession(uuid);
+                IqclAuth.LOGGER.warn("[IQCL Auth] 玩家 {} 因异地登录被锁定", playerName);
+                sendResult(player, false, "检测到异地登录，账号已被临时锁定，请稍后再试");
+                player.networkHandler.disconnect(
+                        net.minecraft.text.Text.literal("[IQCL] 检测到异地登录，账号已被临时锁定，请稍后再试"));
+                return;
+            }
+
             // 检查 IQCL 关联
             LinkStore.LinkData link = LinkStore.load(uuid);
             Integer displayId = (link != null) ? link.displayId : null;
@@ -463,6 +548,7 @@ public final class PasswordManager {
             // 标记认证 + 持久会话 + Limbo 恢复
             AuthState.authenticate(player);
             PlayerSessionManager.recordAuthenticatedIp(player);
+            PlayerSessionManager.bindAuthenticatedIp(player);
             PlayerSessionManager.restoreFromLimbo(player);
 
             // 通知 game-session login
@@ -517,6 +603,192 @@ public final class PasswordManager {
         return new String(buf);
     }
 
+    // ========== TOTP 双因素认证 ==========
+
+    /**
+     * 启用 TOTP 双因素认证（生成密钥 + 返回 URI 供扫码）。
+     */
+    public static void enableTotp(MinecraftServer server, ServerPlayerEntity player,
+                                   Consumer<TotpEnableResult> callback) {
+        if (!checkAvailable(server, player, null)) {
+            if (callback != null) callback.accept(TotpEnableResult.fail("密码登录服务暂不可用"));
+            return;
+        }
+        if (!AuthState.isAuthenticated(player.getUuid())) {
+            if (callback != null) callback.accept(TotpEnableResult.fail("请先登录后再启用 TOTP"));
+            return;
+        }
+        java.util.UUID uuid = player.getUuid();
+        String playerName = player.getEntityName();
+
+        StorageExecutor.submit(server, () -> {
+            try {
+                AccountRecord record = storage.findByUuid(uuid);
+                if (record == null) {
+                    return TotpEnableResult.fail("你尚未注册密码账号");
+                }
+                if (record.totpEnabled) {
+                    return TotpEnableResult.fail("你已启用 TOTP，请先 /iqcl disablerotp");
+                }
+                // 生成新密钥
+                String secret = TotpManager.generateSecret();
+                String uri = TotpManager.buildOtpAuthUri("IQCL Auth", playerName, secret);
+                // 暂存密钥（未启用状态，需确认后才启用）
+                storage.updateTotp(uuid, false, secret, null, System.currentTimeMillis());
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 生成 TOTP 密钥", playerName);
+                return TotpEnableResult.ok(secret, uri);
+            } catch (Exception e) {
+                IqclAuth.LOGGER.error("[IQCL Auth] 玩家 {} 启用 TOTP 异常", playerName, e);
+                return TotpEnableResult.fail("启用 TOTP 失败，请稍后再试");
+            }
+        }, callback, ex -> {
+            if (callback != null) callback.accept(TotpEnableResult.fail("启用 TOTP 失败，请稍后再试"));
+        });
+    }
+
+    /**
+     * 确认启用 TOTP（玩家扫码后输入第一个码验证）。
+     */
+    public static void confirmTotp(MinecraftServer server, ServerPlayerEntity player,
+                                    String code, Consumer<Result> callback) {
+        if (!checkAvailable(server, player, callback)) return;
+        if (!AuthState.isAuthenticated(player.getUuid())) {
+            callback.accept(Result.fail("请先登录"));
+            return;
+        }
+        java.util.UUID uuid = player.getUuid();
+        String playerName = player.getEntityName();
+
+        StorageExecutor.submit(server, () -> {
+            try {
+                AccountRecord record = storage.findByUuid(uuid);
+                if (record == null) return Result.fail("你尚未注册密码账号");
+                if (record.totpEnabled) return Result.fail("你已启用 TOTP");
+                if (record.totpSecret == null || record.totpSecret.isEmpty()) {
+                    return Result.fail("请先执行 /iqcl enablerotp");
+                }
+                // 验证码
+                boolean valid = TotpManager.verify(record.totpSecret, code, record.totpLastCode);
+                if (!valid) {
+                    return Result.fail("TOTP 码错误");
+                }
+                // 正式启用
+                storage.updateTotp(uuid, true, record.totpSecret, code, System.currentTimeMillis());
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 启用 TOTP 成功", playerName);
+                return Result.ok("TOTP 双因素认证已启用，请妥善保存密钥");
+            } catch (Exception e) {
+                IqclAuth.LOGGER.error("[IQCL Auth] 玩家 {} 确认 TOTP 异常", playerName, e);
+                return Result.fail("操作失败，请稍后再试");
+            }
+        }, result -> {
+            sendResult(player, result.success, result.message);
+            if (callback != null) callback.accept(result);
+        }, ex -> {
+            sendResult(player, false, "操作失败，请稍后再试");
+            if (callback != null) callback.accept(Result.fail("操作失败，请稍后再试"));
+        });
+    }
+
+    /**
+     * 禁用 TOTP（需验证密码）。
+     */
+    public static void disableTotp(MinecraftServer server, ServerPlayerEntity player,
+                                    String password, Consumer<Result> callback) {
+        if (!checkAvailable(server, player, callback)) return;
+        if (!AuthState.isAuthenticated(player.getUuid())) {
+            callback.accept(Result.fail("请先登录"));
+            return;
+        }
+        char[] pwd = password.toCharArray();
+        java.util.UUID uuid = player.getUuid();
+        String playerName = player.getEntityName();
+
+        StorageExecutor.submit(server, () -> {
+            try {
+                AccountRecord record = storage.findByUuid(uuid);
+                if (record == null) return Result.fail("你尚未注册密码账号");
+                if (!record.totpEnabled) return Result.fail("你尚未启用 TOTP");
+                // 验证密码
+                boolean ok = PasswordHasher.verify(pwd, record.salt, record.hash, record.iterations);
+                if (!ok) return Result.fail("密码错误");
+                // 禁用 TOTP
+                storage.updateTotp(uuid, false, null, null, System.currentTimeMillis());
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 禁用 TOTP", playerName);
+                return Result.ok("TOTP 双因素认证已禁用");
+            } catch (Exception e) {
+                IqclAuth.LOGGER.error("[IQCL Auth] 玩家 {} 禁用 TOTP 异常", playerName, e);
+                return Result.fail("操作失败，请稍后再试");
+            } finally {
+                PasswordHasher.zero(pwd);
+            }
+        }, result -> {
+            sendResult(player, result.success, result.message);
+            if (callback != null) callback.accept(result);
+        }, ex -> {
+            sendResult(player, false, "操作失败，请稍后再试");
+            if (callback != null) callback.accept(Result.fail("操作失败，请稍后再试"));
+        });
+    }
+
+    /**
+     * 验证 TOTP 码（在密码登录成功后调用，若账号启用了 TOTP）。
+     *
+     * @return true = 验证通过（并更新 lastCode）
+     */
+    public static boolean verifyTotpForLogin(MinecraftServer server, ServerPlayerEntity player,
+                                             AccountRecord record, String code) {
+        if (record == null || !record.totpEnabled) return true; // 未启用 TOTP 直接通过
+        boolean valid = TotpManager.verify(record.totpSecret, code, record.totpLastCode);
+        if (valid) {
+            // 更新 lastCode 防重放
+            StorageExecutor.submit(server, () -> {
+                try {
+                    storage.updateTotpLastCode(record.uuid, code);
+                } catch (Exception ignored) {
+                }
+                return null;
+            }, result -> {}, ex -> {});
+        }
+        return valid;
+    }
+
+    /** 获取账号的 TOTP 状态（用于 /iqcl status 显示）。 */
+    public static boolean isTotpEnabledSync(java.util.UUID uuid) {
+        if (storage == null) return false;
+        try {
+            AccountRecord r = storage.findByUuid(uuid);
+            return r != null && r.totpEnabled;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ========== TOTP 结果载体 ==========
+
+    public static final class TotpEnableResult {
+        public final boolean success;
+        public final String message;
+        /** Base32 密钥（成功时返回）。 */
+        public final String secret;
+        /** otpauth:// URI（成功时返回，供扫码）。 */
+        public final String otpUri;
+
+        private TotpEnableResult(boolean success, String message, String secret, String otpUri) {
+            this.success = success;
+            this.message = message;
+            this.secret = secret;
+            this.otpUri = otpUri;
+        }
+
+        static TotpEnableResult ok(String secret, String otpUri) {
+            return new TotpEnableResult(true, "TOTP 密钥已生成", secret, otpUri);
+        }
+
+        static TotpEnableResult fail(String msg) {
+            return new TotpEnableResult(false, msg, null, null);
+        }
+    }
+
     // ========== 结果载体 ==========
 
     /**
@@ -534,7 +806,8 @@ public final class PasswordManager {
             GENERIC,
             LOGIN_OK,
             FAIL_ACCOUNT,
-            FAIL_LOCKED
+            FAIL_LOCKED,
+            NEED_TOTP
         }
 
         private Result(boolean success, String message, String messageKey,
@@ -548,6 +821,14 @@ public final class PasswordManager {
 
         static Result okForLogin() {
             return new Result(true, "密码登录成功", null, null, Kind.LOGIN_OK);
+        }
+
+        static Result okNeedTotp() {
+            return new Result(true, "需要 TOTP 双因素认证", null, null, Kind.NEED_TOTP);
+        }
+
+        static Result ok(String message) {
+            return new Result(true, message, null, null, Kind.GENERIC);
         }
 
         static Result okKey(String messageKey) {

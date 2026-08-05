@@ -35,26 +35,40 @@ public final class PostgresAccountStorage implements AccountStorage {
             "  hash           BYTEA NOT NULL," +
             "  iterations     INT NOT NULL," +
             "  created_at_ms  BIGINT NOT NULL," +
-            "  updated_at_ms  BIGINT NOT NULL" +
+            "  updated_at_ms  BIGINT NOT NULL," +
+            "  totp_enabled   BOOLEAN NOT NULL DEFAULT FALSE," +
+            "  totp_secret    VARCHAR(64)," +
+            "  totp_last_code VARCHAR(16)" +
             ")";
 
     private static final String CREATE_INDEX_SQL =
             "CREATE INDEX IF NOT EXISTS __schema__idx_accounts_username ON __schema__.accounts(username)";
 
     private static final String SELECT_BY_UUID_SQL =
-            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms " +
+            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code " +
             "FROM __schema__.accounts WHERE uuid = ?";
 
     private static final String SELECT_BY_USERNAME_SQL =
-            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms " +
+            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code " +
             "FROM __schema__.accounts WHERE username = ?";
 
     private static final String INSERT_SQL =
-            "INSERT INTO __schema__.accounts (uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?)";
+            "INSERT INTO __schema__.accounts " +
+            "(uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     private static final String UPDATE_PASSWORD_SQL =
             "UPDATE __schema__.accounts SET salt = ?, hash = ?, iterations = ?, updated_at_ms = ? WHERE uuid = ?";
+
+    private static final String UPDATE_TOTP_SQL =
+            "UPDATE __schema__.accounts SET totp_enabled = ?, totp_secret = ?, totp_last_code = ?, " +
+            "updated_at_ms = ? WHERE uuid = ?";
+
+    private static final String UPDATE_TOTP_LAST_CODE_SQL =
+            "UPDATE __schema__.accounts SET totp_last_code = ? WHERE uuid = ?";
 
     private static final String DELETE_SQL = "DELETE FROM __schema__.accounts WHERE uuid = ?";
 
@@ -128,6 +142,9 @@ public final class PostgresAccountStorage implements AccountStorage {
             ps.setInt(5, record.iterations);
             ps.setLong(6, record.createdAtMs);
             ps.setLong(7, record.updatedAtMs);
+            ps.setBoolean(8, record.totpEnabled);
+            ps.setString(9, record.totpSecret);
+            ps.setString(10, record.totpLastCode);
             int affected = ps.executeUpdate();
             if (affected == 0) throw new StorageException("插入失败：0 行受影响");
         } catch (Exception e) {
@@ -149,6 +166,31 @@ public final class PostgresAccountStorage implements AccountStorage {
             ps.setString(5, uuid.toString());
             int affected = ps.executeUpdate();
             if (affected == 0) throw new StorageException("更新失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotp(UUID uuid, boolean enabled, String secret, String lastCode, long updatedAtMs)
+            throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(replaceSchema(UPDATE_TOTP_SQL))) {
+            ps.setBoolean(1, enabled);
+            ps.setString(2, secret);
+            ps.setString(3, lastCode);
+            ps.setLong(4, updatedAtMs);
+            ps.setString(5, uuid.toString());
+            int affected = ps.executeUpdate();
+            if (affected == 0) throw new StorageException("更新 TOTP 失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotpLastCode(UUID uuid, String lastCode) throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(replaceSchema(UPDATE_TOTP_LAST_CODE_SQL))) {
+            ps.setString(1, lastCode);
+            ps.setString(2, uuid.toString());
+            ps.executeUpdate();
         }
     }
 
@@ -184,6 +226,9 @@ public final class PostgresAccountStorage implements AccountStorage {
     }
 
     private AccountRecord mapRow(ResultSet rs) throws Exception {
+        boolean totpEnabled = rs.getBoolean("totp_enabled");
+        String totpSecret = rs.getString("totp_secret");
+        String totpLastCode = rs.getString("totp_last_code");
         return new AccountRecord(
                 UUID.fromString(rs.getString("uuid")),
                 rs.getString("username"),
@@ -191,7 +236,9 @@ public final class PostgresAccountStorage implements AccountStorage {
                 rs.getBytes("hash"),
                 rs.getInt("iterations"),
                 rs.getLong("created_at_ms"),
-                rs.getLong("updated_at_ms"));
+                rs.getLong("updated_at_ms"),
+                totpEnabled, totpSecret, totpLastCode
+        );
     }
 
     private String replaceSchema(String sql) {

@@ -302,6 +302,16 @@ public final class ServerNetworkHandler {
         server.execute(() -> {
             IqclAuth.LOGGER.debug("[IQCL Auth] [{}] completeLogin 开始执行", playerName);
 
+            // 异地登录检测
+            if (PlayerSessionManager.isCrossIpLogin(player)) {
+                PlayerSessionManager.lockSession(player.getUuid());
+                IqclAuth.LOGGER.warn("[IQCL Auth] 玩家 {} 因异地登录被锁定", playerName);
+                sendResult(server, player, false, "检测到异地登录，账号已被临时锁定，请稍后再试");
+                player.networkHandler.disconnect(
+                        net.minecraft.text.Text.literal("[IQCL] 检测到异地登录，账号已被临时锁定，请稍后再试"));
+                return;
+            }
+
             // 防多开检查
             if (displayId != null) {
                 ServerPlayerEntity kicked = PlayerSessionManager.enforceSingleAccount(player, displayId);
@@ -314,6 +324,7 @@ public final class ServerNetworkHandler {
             // 标记认证
             AuthState.authenticate(player);
             PlayerSessionManager.recordAuthenticatedIp(player);
+            PlayerSessionManager.bindAuthenticatedIp(player);
 
             // 恢复物品/位置
             PlayerSessionManager.restoreFromLimbo(player);

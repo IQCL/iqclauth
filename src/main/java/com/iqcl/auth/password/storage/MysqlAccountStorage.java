@@ -35,26 +35,40 @@ public final class MysqlAccountStorage implements AccountStorage {
             "  hash           VARBINARY(255) NOT NULL," +
             "  iterations     INT NOT NULL," +
             "  created_at_ms  BIGINT NOT NULL," +
-            "  updated_at_ms  BIGINT NOT NULL" +
+            "  updated_at_ms  BIGINT NOT NULL," +
+            "  totp_enabled   TINYINT(1) NOT NULL DEFAULT 0," +
+            "  totp_secret    VARCHAR(64)," +
+            "  totp_last_code VARCHAR(16)" +
             ")";
 
     private static final String CREATE_INDEX_SQL =
             "CREATE INDEX IF NOT EXISTS __prefix__idx_accounts_username ON __prefix__accounts(username)";
 
     private static final String SELECT_BY_UUID_SQL =
-            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms " +
+            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code " +
             "FROM __prefix__accounts WHERE uuid = ?";
 
     private static final String SELECT_BY_USERNAME_SQL =
-            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms " +
+            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code " +
             "FROM __prefix__accounts WHERE username = ?";
 
     private static final String INSERT_SQL =
-            "INSERT INTO __prefix__accounts (uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?)";
+            "INSERT INTO __prefix__accounts " +
+            "(uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     private static final String UPDATE_PASSWORD_SQL =
             "UPDATE __prefix__accounts SET salt = ?, hash = ?, iterations = ?, updated_at_ms = ? WHERE uuid = ?";
+
+    private static final String UPDATE_TOTP_SQL =
+            "UPDATE __prefix__accounts SET totp_enabled = ?, totp_secret = ?, totp_last_code = ?, " +
+            "updated_at_ms = ? WHERE uuid = ?";
+
+    private static final String UPDATE_TOTP_LAST_CODE_SQL =
+            "UPDATE __prefix__accounts SET totp_last_code = ? WHERE uuid = ?";
 
     private static final String DELETE_SQL = "DELETE FROM __prefix__accounts WHERE uuid = ?";
 
@@ -128,10 +142,14 @@ public final class MysqlAccountStorage implements AccountStorage {
             ps.setInt(5, record.iterations);
             ps.setLong(6, record.createdAtMs);
             ps.setLong(7, record.updatedAtMs);
+            ps.setInt(8, record.totpEnabled ? 1 : 0);
+            ps.setString(9, record.totpSecret);
+            ps.setString(10, record.totpLastCode);
             int affected = ps.executeUpdate();
             if (affected == 0) throw new StorageException("插入失败：0 行受影响");
         } catch (Exception e) {
-            if (e.getMessage() != null && e.getMessage().contains("Duplicate entry")) {
+            String msg = e.getMessage();
+            if (msg != null && msg.contains("Duplicate entry")) {
                 throw new StorageException("账号已存在", e);
             }
             throw e;
@@ -149,6 +167,31 @@ public final class MysqlAccountStorage implements AccountStorage {
             ps.setString(5, uuid.toString());
             int affected = ps.executeUpdate();
             if (affected == 0) throw new StorageException("更新失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotp(UUID uuid, boolean enabled, String secret, String lastCode, long updatedAtMs)
+            throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(replacePrefix(UPDATE_TOTP_SQL))) {
+            ps.setInt(1, enabled ? 1 : 0);
+            ps.setString(2, secret);
+            ps.setString(3, lastCode);
+            ps.setLong(4, updatedAtMs);
+            ps.setString(5, uuid.toString());
+            int affected = ps.executeUpdate();
+            if (affected == 0) throw new StorageException("更新 TOTP 失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotpLastCode(UUID uuid, String lastCode) throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(replacePrefix(UPDATE_TOTP_LAST_CODE_SQL))) {
+            ps.setString(1, lastCode);
+            ps.setString(2, uuid.toString());
+            ps.executeUpdate();
         }
     }
 
@@ -184,6 +227,9 @@ public final class MysqlAccountStorage implements AccountStorage {
     }
 
     private AccountRecord mapRow(ResultSet rs) throws Exception {
+        boolean totpEnabled = rs.getInt("totp_enabled") != 0;
+        String totpSecret = rs.getString("totp_secret");
+        String totpLastCode = rs.getString("totp_last_code");
         return new AccountRecord(
                 UUID.fromString(rs.getString("uuid")),
                 rs.getString("username"),
@@ -191,7 +237,9 @@ public final class MysqlAccountStorage implements AccountStorage {
                 rs.getBytes("hash"),
                 rs.getInt("iterations"),
                 rs.getLong("created_at_ms"),
-                rs.getLong("updated_at_ms"));
+                rs.getLong("updated_at_ms"),
+                totpEnabled, totpSecret, totpLastCode
+        );
     }
 
     private String replacePrefix(String sql) {

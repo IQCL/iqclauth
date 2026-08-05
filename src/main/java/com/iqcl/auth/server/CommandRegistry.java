@@ -74,7 +74,11 @@ public final class CommandRegistry {
                                 .then(CommandManager.literal("password")
                                         .then(CommandManager.argument("password",
                                                 StringArgumentType.greedyString())
-                                                .executes(PasswordCommandHandler::executeLoginPassword))))
+                                                .executes(PasswordCommandHandler::executeLoginPassword)))
+                                .then(CommandManager.literal("confirmtotp")
+                                        .then(CommandManager.argument("code",
+                                                StringArgumentType.string())
+                                                .executes(PasswordCommandHandler::executeLoginConfirmTotp))))
                         .then(CommandManager.literal("register")
                                 .then(CommandManager.literal("password")
                                         .then(CommandManager.argument("password",
@@ -127,7 +131,17 @@ public final class CommandRegistry {
                                                 EntityArgumentType.player())
                                                 .executes(PasswordCommandHandler::executeAdminResetPassword)))
                                 .then(CommandManager.literal("reloadstorage")
-                                        .executes(PasswordCommandHandler::executeAdminReloadStorage))));
+                                        .executes(PasswordCommandHandler::executeAdminReloadStorage)))
+                        .then(CommandManager.literal("enablerotp")
+                                .executes(PasswordCommandHandler::executeEnableTotp))
+                        .then(CommandManager.literal("confirmtotp")
+                                .then(CommandManager.argument("code",
+                                        StringArgumentType.string())
+                                        .executes(PasswordCommandHandler::executeConfirmTotp)))
+                        .then(CommandManager.literal("disablerotp")
+                                .then(CommandManager.argument("password",
+                                        StringArgumentType.string())
+                                        .executes(PasswordCommandHandler::executeDisableTotp))));
     }
 
     /**
@@ -223,9 +237,11 @@ public final class CommandRegistry {
             }
         }
         // 密码账号与 IQCL 关联状态
+        boolean totpEnabled = PasswordManager.isTotpEnabledSync(target.getUuid());
         source.sendFeedback(() ->
                 Text.literal("  密码账号: " + (registered ? "已注册" : "未注册")
-                        + " | IQCL 关联: " + (linked ? "已关联" : "未关联"))
+                        + " | IQCL 关联: " + (linked ? "已关联" : "未关联")
+                        + (registered ? " | TOTP: " + (totpEnabled ? "已启用" : "未启用") : ""))
                         .formatted(Formatting.GRAY), false);
     }
 

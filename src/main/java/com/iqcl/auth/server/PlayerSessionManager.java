@@ -44,6 +44,12 @@ public final class PlayerSessionManager {
     /** 传送后坠落保护：UUID → 保护到期时间（毫秒）。 */
     private static final Map<UUID, Long> FALL_PROTECTION = new ConcurrentHashMap<>();
 
+    /** 异地登录锁定：UUID → 锁定到期时间（毫秒）。锁定期间拒绝登录。 */
+    private static final Map<UUID, Long> SESSION_LOCKS = new ConcurrentHashMap<>();
+
+    /** 已认证玩家的绑定 IP：UUID → IP 地址。用于检测异地登录。 */
+    private static final Map<UUID, String> AUTHENTICATED_IPS = new ConcurrentHashMap<>();
+
     /** 持续坠落保护默认时长（毫秒）——传送后 3 秒内免疫坠落伤害。 */
     private static final long FALL_PROTECTION_MS = 3000L;
 
@@ -62,42 +68,54 @@ public final class PlayerSessionManager {
 
     /**
      * 记录玩家进服时的物品和位置快照。
-     * 如果玩家上次在 Limbo 断线（playerdata 保存了 Limbo 位置），用出生点替代。
+     * 优先从磁盘加载上次登出前的快照（防止 Limbo 中断导致物品丢失）。
+     * 如果玩家上次在 Limbo 断线，会用磁盘快照替代 Limbo 位置。
      */
     public static void captureJoinSnapshot(ServerPlayerEntity player) {
-        PlayerSnapshot snapshot = new PlayerSnapshot();
-        snapshot.pos = player.getPos();
-        snapshot.yaw = player.getYaw();
-        snapshot.pitch = player.getPitch();
-        snapshot.worldId = player.getWorld().getRegistryKey().getValue().toString();
-        snapshot.items = new ArrayList<>();
-        PlayerInventory inv = player.getInventory();
-        for (int i = 0; i < inv.size(); i++) {
-            snapshot.items.add(inv.getStack(i).copy());
-        }
-        snapshot.heldItemIndex = inv.selectedSlot;
+        // —— 0) 尝试从磁盘加载上次登出前的快照 ——
+        SnapshotStore.SnapshotData diskSnapshot = SnapshotStore.load(player.getUuid());
 
-        // —— 检测当前位置是否是 Limbo 位置（上次在 Limbo 断线）——
-        ModConfig config = ModConfig.get();
-        if (config.limboEnabled) {
-            Vec3d limboCenter = new Vec3d(
-                    config.limboX + 0.5, config.limboY, config.limboZ + 0.5);
-            double distSq = snapshot.pos.squaredDistanceTo(limboCenter);
-            boolean inLimboDim = snapshot.worldId.equals(config.limboDimension);
+        PlayerSnapshot snapshot;
+        if (diskSnapshot != null) {
+            // 有磁盘快照：用磁盘数据恢复，防止物品/位置丢失
+            snapshot = SnapshotStore.toPlayerSnapshot(diskSnapshot);
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 从磁盘快照恢复位置/物品（登出前状态）",
+                    player.getEntityName());
+        } else {
+            // 无磁盘快照：正常捕获当前状态
+            snapshot = new PlayerSnapshot();
+            snapshot.pos = player.getPos();
+            snapshot.yaw = player.getYaw();
+            snapshot.pitch = player.getPitch();
+            snapshot.worldId = player.getWorld().getRegistryKey().getValue().toString();
+            snapshot.items = new ArrayList<>();
+            PlayerInventory inv = player.getInventory();
+            for (int i = 0; i < inv.size(); i++) {
+                snapshot.items.add(inv.getStack(i).copy());
+            }
+            snapshot.heldItemIndex = inv.selectedSlot;
 
-            // 距离 Limbo 中心 < 25 格（约 5 格半径）且在 Limbo 维度 → 视为 Limbo 位置
-            if (distSq < 25.0 && inLimboDim) {
-                IqclAuth.LOGGER.info("[IQCL Auth] 检测到玩家 {} 的 playerdata 位置在 Limbo，使用出生点替代",
-                        player.getEntityName());
-                // 用世界出生点替代
-                ServerWorld world = player.getServerWorld();
-                BlockPos spawnPos = world.getSpawnPos();
-                snapshot.pos = new Vec3d(
-                        spawnPos.getX() + 0.5,
-                        spawnPos.getY(),
-                        spawnPos.getZ() + 0.5);
-                snapshot.yaw = world.getSpawnAngle();
-                snapshot.pitch = 0f;
+            // —— 检测当前位置是否是 Limbo 位置（上次在 Limbo 断线）——
+            ModConfig config = ModConfig.get();
+            if (config.limboEnabled) {
+                Vec3d limboCenter = new Vec3d(
+                        config.limboX + 0.5, config.limboY, config.limboZ + 0.5);
+                double distSq = snapshot.pos.squaredDistanceTo(limboCenter);
+                boolean inLimboDim = snapshot.worldId.equals(config.limboDimension);
+
+                if (distSq < 25.0 && inLimboDim) {
+                    IqclAuth.LOGGER.info("[IQCL Auth] 检测到玩家 {} 的 playerdata 在 Limbo，使用出生点替代",
+                            player.getEntityName());
+                    ServerWorld world = player.getServerWorld();
+                    BlockPos spawnPos = world.getSpawnPos();
+                    snapshot.pos = new Vec3d(
+                            spawnPos.getX() + 0.5,
+                            spawnPos.getY(),
+                            spawnPos.getZ() + 0.5);
+                    snapshot.yaw = world.getSpawnAngle();
+                    snapshot.pitch = 0f;
+                    // 物品保持 playerdata 中的空背包（Limbo 中断时已被清空）
+                }
             }
         }
 
@@ -268,6 +286,9 @@ public final class PlayerSessionManager {
 
         LIMBO_PLAYERS.remove(player.getUuid());
         JOIN_SNAPSHOTS.remove(player.getUuid());
+
+        // —— 清除磁盘快照（已成功恢复，不需要保留）——
+        SnapshotStore.remove(player.getUuid());
     }
 
     /**
@@ -354,6 +375,94 @@ public final class PlayerSessionManager {
      */
     public static void removeSession(UUID uuid) {
         PERSISTENT_SESSIONS.remove(uuid);
+        AUTHENTICATED_IPS.remove(uuid);
+    }
+
+    // ========== 异地登录检测 ==========
+
+    /** 默认异地登录锁定时长（毫秒）—— 5 分钟。 */
+    private static final long SESSION_LOCK_MS = 5 * 60 * 1000L;
+
+    /**
+     * 绑定玩家认证 IP（登录成功后调用）。
+     */
+    public static void bindAuthenticatedIp(ServerPlayerEntity player) {
+        String ip = getPlayerIp(player);
+        if (ip != null) {
+            AUTHENTICATED_IPS.put(player.getUuid(), ip);
+            IqclAuth.LOGGER.debug("[IQCL Auth] 玩家 {} 绑定认证 IP={}", player.getEntityName(), ip);
+        }
+    }
+
+    /**
+     * 检查是否为异地登录（IP 不匹配且配置了 IP 绑定）。
+     *
+     * @return true = 异地登录，应触发锁定
+     */
+    public static boolean isCrossIpLogin(ServerPlayerEntity player) {
+        ModConfig config = ModConfig.get();
+        if (!config.enableIpBinding) return false;
+
+        UUID uuid = player.getUuid();
+        String boundIp = AUTHENTICATED_IPS.get(uuid);
+        if (boundIp == null) return false; // 首次登录，无需检查
+
+        String currentIp = getPlayerIp(player);
+        if (currentIp == null) return false;
+
+        if (!currentIp.equals(boundIp)) {
+            IqclAuth.LOGGER.warn("[IQCL Auth] 检测到玩家 {} 异地登录！绑定 IP={}, 当前 IP={}",
+                    player.getEntityName(), boundIp, currentIp);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 锁定玩家会话（异地登录检测触发）。
+     * 锁定期间该玩家 UUID 无法登录。
+     */
+    public static void lockSession(UUID uuid) {
+        long expireAt = System.currentTimeMillis() + SESSION_LOCK_MS;
+        SESSION_LOCKS.put(uuid, expireAt);
+        IqclAuth.LOGGER.warn("[IQCL Auth] 玩家 {} 会话已锁定 ({} 秒)", uuid, SESSION_LOCK_MS / 1000);
+    }
+
+    /**
+     * 解锁玩家会话。
+     */
+    public static void unlockSession(UUID uuid) {
+        SESSION_LOCKS.remove(uuid);
+    }
+
+    /**
+     * 检查玩家是否处于会话锁定状态。
+     */
+    public static boolean isSessionLocked(UUID uuid) {
+        Long expireAt = SESSION_LOCKS.get(uuid);
+        if (expireAt == null) return false;
+        if (System.currentTimeMillis() > expireAt) {
+            SESSION_LOCKS.remove(uuid);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 获取锁定剩余秒数。
+     */
+    public static long getLockRemainingSeconds(UUID uuid) {
+        Long expireAt = SESSION_LOCKS.get(uuid);
+        if (expireAt == null) return 0;
+        long remaining = (expireAt - System.currentTimeMillis()) / 1000L;
+        return Math.max(0, remaining);
+    }
+
+    /**
+     * 获取玩家绑定的认证 IP。
+     */
+    public static String getBoundIp(UUID uuid) {
+        return AUTHENTICATED_IPS.get(uuid);
     }
 
     /**
@@ -399,8 +508,11 @@ public final class PlayerSessionManager {
         }
         snapshot.heldItemIndex = inv.selectedSlot;
         JOIN_SNAPSHOTS.put(player.getUuid(), snapshot);
-        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 登出前快照位置: {}",
-                player.getEntityName(), snapshot.pos);
+
+        // —— 1.5) 持久化快照到磁盘（防止 Limbo 中断导致物品/位置永久丢失）——
+        SnapshotStore.save(player.getUuid(), snapshot);
+        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 登出前快照已持久化: 位置={}, 物品数={}",
+                player.getEntityName(), snapshot.pos, snapshot.items.size());
 
         // —— 2) 传送回 Limbo ——
         sendToLimboInternal(player, clearInventory);

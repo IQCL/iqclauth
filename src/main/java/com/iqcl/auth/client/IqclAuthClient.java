@@ -10,9 +10,12 @@ package com.iqcl.auth.client;
 import com.iqcl.auth.IqclAuth;
 import com.iqcl.auth.network.NetworkConstants;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.network.PacketByteBuf;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 
 /**
  * 客户端入口（client entrypoint）。
@@ -59,8 +62,8 @@ public class IqclAuthClient implements ClientModInitializer {
                         MinecraftClient mc = MinecraftClient.getInstance();
                         if (mc.player != null) {
                             mc.player.sendMessage(
-                                    net.minecraft.text.Text.literal("[IQCL] 已登出，请重新登录")
-                                            .formatted(net.minecraft.util.Formatting.GRAY),
+                                    Text.literal("[IQCL] 已登出，请重新登录")
+                                            .formatted(Formatting.GRAY),
                                     false);
                         }
                     });
@@ -78,6 +81,28 @@ public class IqclAuthClient implements ClientModInitializer {
                                 passwordEnabled);
                     });
                 });
+
+        // 客户端环境提示：单人/联机模式时告知用户 IQCL Auth 登录不可用
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            if (IqclAuth.isClientEnvironment()) {
+                client.execute(() -> {
+                    if (client.player != null) {
+                        client.player.sendMessage(
+                                Text.literal("====================================")
+                                        .formatted(Formatting.GOLD), false);
+                        client.player.sendMessage(
+                                Text.literal("[IQCL] 当前处于单人/联机模式")
+                                        .formatted(Formatting.YELLOW, Formatting.BOLD), false);
+                        client.player.sendMessage(
+                                Text.literal("IQCL Auth 登录功能仅在安装了该模组的专用服务器上可用")
+                                        .formatted(Formatting.GRAY), false);
+                        client.player.sendMessage(
+                                Text.literal("====================================")
+                                        .formatted(Formatting.GOLD), false);
+                    }
+                });
+            }
+        });
 
         IqclAuth.LOGGER.info("[IQCL Auth] 客户端初始化完成");
     }

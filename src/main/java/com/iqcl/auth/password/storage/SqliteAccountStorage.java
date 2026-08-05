@@ -24,19 +24,6 @@ import java.util.UUID;
  * SQLite 存储后端实现（默认）。
  * <p>
  * 使用 HikariCP 连接池（连接池大小固定为 1，SQLite 单写入特性使大池无收益）。
- * 表结构：
- * <pre>
- * CREATE TABLE iqclauth_accounts (
- *   uuid           VARCHAR(36) PRIMARY KEY,
- *   username       VARCHAR(64) NOT NULL,
- *   salt           BLOB NOT NULL,
- *   hash           BLOB NOT NULL,
- *   iterations     INTEGER NOT NULL,
- *   created_at_ms  BIGINT NOT NULL,
- *   updated_at_ms  BIGINT NOT NULL
- * );
- * CREATE INDEX idx_accounts_username ON iqclauth_accounts(username);
- * </pre>
  */
 public final class SqliteAccountStorage implements AccountStorage {
 
@@ -48,28 +35,48 @@ public final class SqliteAccountStorage implements AccountStorage {
             "  hash           BLOB NOT NULL," +
             "  iterations     INTEGER NOT NULL," +
             "  created_at_ms  BIGINT NOT NULL," +
-            "  updated_at_ms  BIGINT NOT NULL" +
+            "  updated_at_ms  BIGINT NOT NULL," +
+            "  totp_enabled   INTEGER NOT NULL DEFAULT 0," +
+            "  totp_secret    VARCHAR(64)," +
+            "  totp_last_code VARCHAR(16)" +
             ")";
+
+    private static final String MIGRATE_TOTP_SQL =
+            "ALTER TABLE iqclauth_accounts ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0";
+    private static final String MIGRATE_TOTP_SECRET_SQL =
+            "ALTER TABLE iqclauth_accounts ADD COLUMN totp_secret VARCHAR(64)";
+    private static final String MIGRATE_TOTP_LAST_CODE_SQL =
+            "ALTER TABLE iqclauth_accounts ADD COLUMN totp_last_code VARCHAR(16)";
 
     private static final String CREATE_INDEX_SQL =
             "CREATE INDEX IF NOT EXISTS idx_accounts_username ON iqclauth_accounts(username)";
 
     private static final String SELECT_BY_UUID_SQL =
-            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms " +
+            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code " +
             "FROM iqclauth_accounts WHERE uuid = ?";
 
     private static final String SELECT_BY_USERNAME_SQL =
-            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms " +
+            "SELECT uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code " +
             "FROM iqclauth_accounts WHERE username = ?";
 
     private static final String INSERT_SQL =
             "INSERT INTO iqclauth_accounts " +
-            "(uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?)";
+            "(uuid, username, salt, hash, iterations, created_at_ms, updated_at_ms, " +
+            "totp_enabled, totp_secret, totp_last_code) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     private static final String UPDATE_PASSWORD_SQL =
             "UPDATE iqclauth_accounts SET salt = ?, hash = ?, iterations = ?, updated_at_ms = ? " +
             "WHERE uuid = ?";
+
+    private static final String UPDATE_TOTP_SQL =
+            "UPDATE iqclauth_accounts SET totp_enabled = ?, totp_secret = ?, totp_last_code = ?, " +
+            "updated_at_ms = ? WHERE uuid = ?";
+
+    private static final String UPDATE_TOTP_LAST_CODE_SQL =
+            "UPDATE iqclauth_accounts SET totp_last_code = ? WHERE uuid = ?";
 
     private static final String DELETE_SQL =
             "DELETE FROM iqclauth_accounts WHERE uuid = ?";
@@ -79,11 +86,7 @@ public final class SqliteAccountStorage implements AccountStorage {
 
     private final HikariDataSource dataSource;
 
-    /**
-     * @param dbFile 数据库文件路径（如 config/iqclauth/passwords.db）
-     */
     public SqliteAccountStorage(Path dbFile) throws Exception {
-        // 显式加载驱动（旧版 JDBC 兼容）
         try {
             Class.forName("org.sqlite.JDBC");
         } catch (ClassNotFoundException e) {
@@ -98,14 +101,12 @@ public final class SqliteAccountStorage implements AccountStorage {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:sqlite:" + dbFile.toAbsolutePath().toString().replace('\\', '/'));
         config.setDriverClassName("org.sqlite.JDBC");
-        // SQLite 单写入：连接池大小固定为 1，避免锁争用
         config.setMaximumPoolSize(1);
         config.setMinimumIdle(1);
         config.setConnectionTimeout(5000);
         config.setIdleTimeout(60000);
         config.setMaxLifetime(0);
         config.setPoolName("IQCLAuth-SQLite");
-        // SQLite 连接初始化：开启 WAL 模式提升并发读，开启外键约束
         config.addDataSourceProperty("journal_mode", "WAL");
         config.addDataSourceProperty("foreign_keys", "true");
         config.addDataSourceProperty("busy_timeout", "5000");
@@ -120,6 +121,23 @@ public final class SqliteAccountStorage implements AccountStorage {
              Statement stmt = conn.createStatement()) {
             stmt.execute(CREATE_TABLE_SQL);
             stmt.execute(CREATE_INDEX_SQL);
+            // 迁移：旧表可能没有 TOTP 列
+            migrateColumnIfMissing(stmt, "totp_enabled", MIGRATE_TOTP_SQL);
+            migrateColumnIfMissing(stmt, "totp_secret", MIGRATE_TOTP_SECRET_SQL);
+            migrateColumnIfMissing(stmt, "totp_last_code", MIGRATE_TOTP_LAST_CODE_SQL);
+        }
+    }
+
+    private void migrateColumnIfMissing(Statement stmt, String column, String alterSql) {
+        try {
+            stmt.execute(alterSql);
+            IqclAuth.LOGGER.info("[IQCL Auth] SQLite 迁移：添加列 {}", column);
+        } catch (Exception e) {
+            // 列已存在，忽略
+            if (!e.getMessage().contains("duplicate column")
+                    && !e.getMessage().contains("already exists")) {
+                IqclAuth.LOGGER.warn("[IQCL Auth] SQLite 迁移列 {} 失败: {}", column, e.getMessage());
+            }
         }
     }
 
@@ -137,9 +155,7 @@ public final class SqliteAccountStorage implements AccountStorage {
              PreparedStatement ps = conn.prepareStatement(SELECT_BY_UUID_SQL)) {
             ps.setString(1, uuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return mapRow(rs);
-                }
+                if (rs.next()) return mapRow(rs);
             }
         }
         return null;
@@ -151,9 +167,7 @@ public final class SqliteAccountStorage implements AccountStorage {
              PreparedStatement ps = conn.prepareStatement(SELECT_BY_USERNAME_SQL)) {
             ps.setString(1, username);
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return mapRow(rs);
-                }
+                if (rs.next()) return mapRow(rs);
             }
         }
         return null;
@@ -170,12 +184,12 @@ public final class SqliteAccountStorage implements AccountStorage {
             ps.setInt(5, record.iterations);
             ps.setLong(6, record.createdAtMs);
             ps.setLong(7, record.updatedAtMs);
+            ps.setInt(8, record.totpEnabled ? 1 : 0);
+            ps.setString(9, record.totpSecret);
+            ps.setString(10, record.totpLastCode);
             int affected = ps.executeUpdate();
-            if (affected == 0) {
-                throw new StorageException("插入失败：0 行受影响");
-            }
+            if (affected == 0) throw new StorageException("插入失败：0 行受影响");
         } catch (Exception e) {
-            // SQLite 主键冲突报错信息含 "UNIQUE constraint failed"
             String msg = e.getMessage();
             if (msg != null && msg.contains("UNIQUE constraint failed")) {
                 throw new StorageException("账号已存在", e);
@@ -194,9 +208,32 @@ public final class SqliteAccountStorage implements AccountStorage {
             ps.setLong(4, updatedAtMs);
             ps.setString(5, uuid.toString());
             int affected = ps.executeUpdate();
-            if (affected == 0) {
-                throw new StorageException("更新失败：账号不存在");
-            }
+            if (affected == 0) throw new StorageException("更新失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotp(UUID uuid, boolean enabled, String secret, String lastCode, long updatedAtMs)
+            throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(UPDATE_TOTP_SQL)) {
+            ps.setInt(1, enabled ? 1 : 0);
+            ps.setString(2, secret);
+            ps.setString(3, lastCode);
+            ps.setLong(4, updatedAtMs);
+            ps.setString(5, uuid.toString());
+            int affected = ps.executeUpdate();
+            if (affected == 0) throw new StorageException("更新 TOTP 失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotpLastCode(UUID uuid, String lastCode) throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(UPDATE_TOTP_LAST_CODE_SQL)) {
+            ps.setString(1, lastCode);
+            ps.setString(2, uuid.toString());
+            ps.executeUpdate();
         }
     }
 
@@ -220,8 +257,10 @@ public final class SqliteAccountStorage implements AccountStorage {
         }
     }
 
-    /** 将结果集当前行映射为 AccountRecord。 */
     private static AccountRecord mapRow(ResultSet rs) throws Exception {
+        boolean totpEnabled = rs.getInt("totp_enabled") != 0;
+        String totpSecret = rs.getString("totp_secret");
+        String totpLastCode = rs.getString("totp_last_code");
         return new AccountRecord(
                 UUID.fromString(rs.getString("uuid")),
                 rs.getString("username"),
@@ -229,7 +268,8 @@ public final class SqliteAccountStorage implements AccountStorage {
                 rs.getBytes("hash"),
                 rs.getInt("iterations"),
                 rs.getLong("created_at_ms"),
-                rs.getLong("updated_at_ms")
+                rs.getLong("updated_at_ms"),
+                totpEnabled, totpSecret, totpLastCode
         );
     }
 }

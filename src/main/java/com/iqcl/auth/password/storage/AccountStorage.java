@@ -64,6 +64,23 @@ public interface AccountStorage {
     void updatePassword(UUID uuid, byte[] salt, byte[] hash, int iterations, long updatedAtMs) throws Exception;
 
     /**
+     * 更新 TOTP 双因素认证配置。
+     *
+     * @param uuid        玩家 UUID
+     * @param enabled     是否启用
+     * @param secret      TOTP Base32 密钥（启用时必填，禁用时为 null）
+     * @param lastCode    上次使用的码（用于重放防护）
+     * @param updatedAtMs 更新时间
+     * @throws StorageException 不存在或写入失败
+     */
+    void updateTotp(UUID uuid, boolean enabled, String secret, String lastCode, long updatedAtMs) throws Exception;
+
+    /**
+     * 更新 lastUsedCode（重放防护，每次 TOTP 验证成功后调用）。
+     */
+    void updateTotpLastCode(UUID uuid, String lastCode) throws Exception;
+
+    /**
      * 删除账号，不存在不报错。
      */
     void delete(UUID uuid) throws Exception;

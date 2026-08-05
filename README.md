@@ -1,19 +1,29 @@
 # IQCL Auth — Fabric 1.20.1 双端认证模组
 
-基于 Fabric Loader 的双端（客户端 + 服务端）认证模组，提供两种登录方式：
+> 官方站点：<https://www.iqcl.de5.net> ｜ 源码仓库：<https://github.com/IQCL/iqclauth> ｜ 当前版本：`0.1.0-beta`
 
-1. **PIN 登录**（远程验证）：客户端使用 **RSA-OAEP-2048/SHA-256** 加密 PIN，服务端作为不可信透明转发节点将密文 POST 至远程验证服务器，并对验证服务器返回的 **Ed25519** 签名执行规范化 JSON 验签。
-2. **密码登录**（本地验证，借鉴 EasyAuth 思路自主实现）：服务端本地存储密码哈希（**PBKDF2WithHmacSHA256**，100k 迭代 + 16 字节随机盐），支持多存储后端（SQLite 默认，阶段 3 将扩展 MySQL/PostgreSQL/MongoDB）。密码登录与 PIN 登录互通——任一方式登录后即解锁所有限制。
+基于 Fabric Loader 的双端（客户端 + 服务端）认证模组，提供两种互相打通的登录方式，并内置会话治理、防多开、TOTP 2FA、Limbo 隔离区、坐标保护等完整安全栈。所有远程验证服务均由 **IQCL 官方域 `www.iqcl.de5.net`** 提供。
+
+| 登录方式 | 加密通道 | 凭证存储 | 适用场景 |
+| --- | --- | --- | --- |
+| **PIN 登录**（远程验证） | 客户端 **RSA-OAEP-2048/SHA-256** 加密 PIN，服务端透明转发至 `https://www.iqcl.de5.net/api/verify-pin`，对返回的 **Ed25519** 签名执行规范化 JSON 验签 | 远程 IQCL 账号 | 与 IQCL 账号体系打通，跨服统一身份 |
+| **密码登录**（本地验证，借鉴 EasyAuth 思路自主实现） | 客户端 / 服务端 **X25519 ECDH + AES-256-GCM** 加密通道 | 服务端本地 **PBKDF2WithHmacSHA256**（100k 迭代 + 16 字节盐），多存储后端 | 单服独立账号，无需 IQCL 账号即可使用 |
+
+任一方式登录后即解锁所有限制，并写入持久会话；同 IP 重连可自动恢复，无需再次输入凭证。
 
 ## ⚠️ 重要安全声明
 
-1. 模组内置固定 RSA 公钥、Ed25519 公钥，仅适配 IQCL 官方验证服务；
-2. 技术上任何人可修改源码替换内置公钥，搭建仿冒验证服务。开源协议仅约束代码版权，无法阻止此类篡改；
-3. 客户端未安装本模组时，`/iqcl login pin` 指令会明文发送 PIN，存在严重安全风险；
-4. 密码登录在阶段 1 走服务端命令降级路径（明文经 MC 加密通道传输，服务端不记录日志）；阶段 2 将增加客户端 ECDH+AES-GCM 加密通道；
-5. 模组仅提供通信加密方案，整体安全根基依赖远程验证服务器（PIN）与本地 PBKDF2 哈希（密码）。
+1. 模组内置固定 RSA 公钥、Ed25519 公钥、X25519 服务端公钥，仅适配 IQCL 官方验证服务 `https://www.iqcl.de5.net`；
+2. 技术上任何人可修改源码替换内置公钥、把 API 指向仿冒验证服务器。开源协议仅约束代码版权，无法阻止此类篡改；
+3. 客户端未安装本模组时，`/iqcl login pin` 指令会以明文经 MC 加密通道发送 PIN，存在严重安全风险，**强制要求双端均安装本模组**；
+4. 模组仅提供通信加密方案，整体安全根基依赖：
+   - PIN 登录路径：IQCL 远程验证服务器 + Ed25519 验签
+   - 密码登录路径：服务端 PBKDF2 哈希 + X25519/AES-GCM 传输加密
+5. **不使用 BouncyCastle**：Fabric Loader 嵌套 JAR 环境下 BouncyCastle JCE Provider 会导致认证失败，本模组全部加密原语（RSA-OAEP、Ed25519、X25519、AES-GCM、PBKDF2）均由 **JDK 17 内置 JCE** 提供。
 
 ## 安全模型
+
+### PIN 登录（远程 IQCL 账号验证）
 
 ```
 MC 客户端(模组)
@@ -22,10 +32,10 @@ MC 客户端(模组)
   │  ③ 组装 {v, ts, nonce, ciphertext} 通过自定义数据包发送
   ▼
 MC 服务端(模组)   ← 不可信转发节点，无 RSA 私钥，不解密 ciphertext
-  │  ④ 原样 POST 密文包 → 验证服务器 /api/verify-pin
+  │  ④ 原样 POST 密文包 → https://www.iqcl.de5.net/api/verify-pin
   │     Header: Content-Type: application/json, X-Server-Key: <配置>
   ▼
-远程验证服务器
+IQCL 验证服务器 (www.iqcl.de5.net)
   │  ⑤ RSA 解密 → 校验 PIN → 生成 Ed25519 签名响应
   ▼
 MC 服务端(模组)
@@ -37,57 +47,147 @@ MC 客户端(模组)   → 聊天框展示成功/失败
 
 **硬性规则**：PIN 明文仅存在客户端本地；上行纯 RSA 非对称加密；下行 Ed25519 验签；两套密钥职责分离；MC 服务端永不持有 RSA 私钥。
 
+### 密码登录（服务端本地验证）
+
+```
+玩家加入 → 服务端推送 s2c_authinfo（X25519 公钥 + 功能开关）
+        ↓
+客户端拦截 /iqcl login password / register / changepassword / unregister
+        │  ① 生成临时 X25519 密钥对，与服务端静态公钥协商出共享密钥
+        │  ② AES-256-GCM 加密 {op, payload, nonce}
+        │  ③ 通过 c2s_password 通道发送
+        ▼
+服务端 PasswordNetworkHandler
+  ① 用自身 X25519 静态私钥协商出同一共享密钥
+  ② AES-GCM 解密（认证标签失败直接拒绝）
+  ③ 在异步线程池执行 PBKDF2 校验 / 写库
+  ④ 通过 s2c_result 回传结果
+```
+
+密码登录与 PIN 登录互通：任一方式登录后即解锁所有限制，并触发持久会话；密码登录成功后若未关联 IQCL 账号，会提示执行 `/iqcl login pin` 关联（不强制）。
+
+## 功能矩阵
+
+| 模块 | 功能 | 默认值 / 说明 |
+| --- | --- | --- |
+| **登录** | PIN 远程验证 | 强制双端模组 |
+|  | 密码本地登录（注册 / 登录 / 改密 / 注销） | `passwordLoginEnabled=true` |
+| **2FA** | TOTP（RFC 6238，兼容 Google Authenticator） | 30 秒步长、6 位、含重放防护 |
+| **会话** | 持久会话自动登录（同 IP 重连） | `persistentSession=true`，`sessionMaxAgeSeconds=28800`（8h） |
+|  | 异地登录检测（IP 绑定） | `enableIpBinding=true` |
+|  | 单账号唯一在线（防多开，异地登录踢旧连接） | `singleAccountOnline=true` |
+|  | Session 超时踢出 | `sessionTimeoutSeconds=1800` |
+| **隔离** | Limbo 隔离区（清空背包 + 传送至天空平台） | `limboEnabled=true`，默认 (0, 200, 0) |
+|  | 登录后恢复物品 / 位置 / 朝向 | `restoreOnLogin=true` |
+|  | 坐标保护（登录时快照防离线篡改） | 内置实现 |
+|  | 进服清空背包（防丢失） | `clearInventoryOnJoin=true` |
+| **限制** | 视角 / 移动 / 破坏 / 攻击方块 / 放置 / 实体交互 / 实体攻击 / 物品使用 / 容器 / 聊天命令 | 全部独立布尔开关，宽限期后生效 |
+|  | 登录超时自动踢出 | `loginTimeoutSeconds=300` |
+|  | 宽限期 | `gracePeriodSeconds=15`，`-1` 关闭 |
+| **存储** | SQLite / MySQL / PostgreSQL / MongoDB | 默认 SQLite，可热重载 |
+| **防护** | 爆破锁定（5 次失败锁 5 分钟，指数退避封顶 1h） | `loginAttempt.*` |
+|  | 密码策略（长度 / 复杂度 / 弱密码黑名单） | `passwordPolicy.*` |
+| **集成** | game-session API（登录 / 登出通知 `www.iqcl.de5.net`） | `enableGameSessionApi=true` |
+|  | LuckPerms 上下文（认证状态注入权限上下文） | 自动探测，未安装则跳过 |
+|  | 多语言（zh_cn / en_us） | 跟随客户端语言 |
+| **管理** | `/iqcl force` 强行登录、`/iqcl admin *` 管理、`/iqcl status/logout` | OP 2 级权限 |
+| **环境检测** | 自动识别 CLIENT/SERVER 环境，单人/联机模式跳过服务端限制 | 基于 `EnvType` 检测 |
+
 ## 项目结构
 
 ```
 iqclauth/
-├── build.gradle                         # Loom 构建脚本，含 BouncyCastle 依赖
+├── build.gradle                         # Loom 构建脚本，含数据库驱动嵌套 JAR
 ├── settings.gradle
-├── gradle.properties                    # 版本与依赖配置
+├── gradle.properties                    # 版本与依赖配置（mod_version=0.1.0-beta）
 ├── gradle/wrapper/gradle-wrapper.properties
-├── LICENSE
+├── LICENSE                             # MPL-2.0
 └── src/main/
     ├── resources/
-    │   └── fabric.mod.json              # 模组元数据，区分 main/client entrypoint
+    │   ├── fabric.mod.json              # 模组元数据，区分 main/client entrypoint
+    │   └── assets/iqclauth/lang/
+    │       ├── zh_cn.json               # 简体中文
+    │       └── en_us.json               # 英文
     └── java/com/iqcl/auth/
         ├── IqclAuth.java                # 主入口（公共/服务端初始化）
         ├── client/
-        │   ├── IqclAuthClient.java      # 客户端入口
-        │   └── PinChatInterceptor.java  # 聊天拦截 + RSA 加密 + 发包
-        ├── server/
-        │   └── ServerNetworkHandler.java# 密文转发 + Ed25519 验签 + 结果回传
+        │   ├── IqclAuthClient.java       # 客户端入口
+        │   ├── PinChatInterceptor.java   # PIN 拦截 + RSA-OAEP 加密 + 发包
+        │   ├── PasswordChatInterceptor.java # 密码命令拦截 + X25519/AES-GCM 加密
+        │   ├── EcdhClient.java           # 客户端 X25519 密钥协商
+        │   └── ClientAuthState.java      # 客户端本地认证状态
         ├── config/
-        │   └── ModConfig.java           # JSON 配置（API 地址 + X-Server-Key）
+        │   └── ModConfig.java           # JSON 配置（API 地址常量 + 全部开关）
+        ├── context/
+        │   └── LuckPermsContextProvider.java # LuckPerms 上下文注入
         ├── crypto/
-        │   ├── Base64Utils.java         # Base64 编解码
-        │   ├── HexNonceGenerator.java   # 32 位 hex nonce 生成
+        │   ├── Base64Utils.java
+        │   ├── HexNonceGenerator.java   # 32 位 hex nonce
         │   ├── CanonicalJson.java       # 规范化 JSON 序列化（验签前必须使用）
-        │   ├── RsaOaepEncryptor.java    # RSA-OAEP-2048/SHA-256 加密（含硬编码公钥）
-        │   └── Ed25519Verifier.java     # Ed25519 验签（含硬编码公钥）
-        └── network/
-            └── NetworkConstants.java    # 通道 Identifier 常量
+        │   ├── RsaOaepEncryptor.java    # RSA-OAEP-2048/SHA-256（硬编码公钥）
+        │   └── Ed25519Verifier.java     # Ed25519 验签（硬编码公钥，启动预热）
+        ├── network/
+        │   └── NetworkConstants.java    # 5 个通道 Identifier 常量
+        ├── password/
+        │   ├── AccountRecord.java
+        │   ├── LoginAttemptLimiter.java # 爆破防护
+        │   ├── PasswordCommandHandler.java # 密码命令处理
+        │   ├── PasswordManager.java     # 密码管理 + TOTP 开关
+        │   ├── PasswordPolicy.java      # 密码策略校验
+        │   ├── crypto/
+        │   │   ├── EcdhEncryptor.java   # X25519 + AES-256-GCM
+        │   │   ├── PasswordHasher.java  # PBKDF2WithHmacSHA256
+        │   │   ├── SaltGenerator.java
+        │   │   ├── ServerKeyStore.java  # 服务端 X25519 静态密钥对
+        │   │   └── TotpManager.java     # RFC 6238 TOTP
+        │   ├── net/
+        │   │   └── PasswordNetworkHandler.java # c2s_password 解密 + 派发
+        │   └── storage/
+        │       ├── AccountStorage.java          # 存储接口
+        │       ├── AccountStorageFactory.java   # 工厂（按 backend 字段选择）
+        │       ├── SqliteAccountStorage.java    # SQLite（默认）
+        │       ├── MysqlAccountStorage.java
+        │       ├── PostgresAccountStorage.java
+        │       ├── MongoAccountStorage.java
+        │       └── StorageExecutor.java         # 异步线程池
+        └── server/
+            ├── ApiGateway.java          # 远程 API 调用封装（含 X-Server-Key 头）
+            ├── AuthState.java           # 玩家认证 / 关联状态机
+            ├── CommandRegistry.java     # /iqcl 全部指令注册
+            ├── LinkStore.java           # UUID ↔ IQCL displayId 持久化
+            ├── PlayerRestrictionManager.java # 行为限制（事件 + 包级双层）
+            ├── PlayerSessionManager.java # Limbo / 持久会话 / 防多开 / 坐标快照
+            ├── ServerNetworkHandler.java # PIN 密文转发 + Ed25519 验签
+            └── SnapshotStore.java       # 物品 / 位置快照
 ```
 
-> Fabric 1.20.1 使用旧版 Networking API v1（`Identifier` + `PacketByteBuf` + `PlayChannelHandler`），
-> 不使用 1.20.2+ 的 `CustomPayload` / `PacketCodec` / `PayloadTypeRegistry` API。
+> Fabric 1.20.1 使用旧版 Networking API v1（`Identifier` + `PacketByteBuf` + `ServerPlayNetworking.send`），不使用 1.20.2+ 的 `CustomPayload` / `PacketCodec` / `PayloadTypeRegistry` API。
+
+### 自定义网络通道
+
+| 通道 Identifier | 方向 | 用途 |
+| --- | --- | --- |
+| `iqclauth:c2s_verify` | C→S | RSA 加密后的 PIN 密文包 |
+| `iqclauth:s2c_result` | S→C | 验签结果（成功/失败 + 消息） |
+| `iqclauth:s2c_logout` | S→C | 登出通知（客户端重置本地状态） |
+| `iqclauth:c2s_password` | C→S | X25519+AES-GCM 加密的密码操作包 |
+| `iqclauth:s2c_authinfo` | S→C | 玩家加入时推送服务端 X25519 公钥 + 功能开关 |
 
 ## 编译
 
 ### 前置要求
 
-- **JDK 17+**（Minecraft 1.20.1 最低要求，实测 JDK 21 可用）
+- **JDK 17+**（Minecraft 1.20.1 最低要求，实测 JDK 21 可用；提供全部加密原语）
 - **Gradle 8.6+**（或使用项目 wrapper）
 
 ### 生成 Gradle Wrapper（非必要）
 
-项目附带 `gradle-wrapper.jar`（二进制文件）。若损坏请重新初始化。
+项目附带 `gradle-wrapper.jar`（二进制文件）。若损坏请重新初始化：
 
 ```bash
 cd f:\iqclauth
 gradle wrapper --gradle-version 8.6
 ```
-
-生成后即可使用 `gradlew` / `gradlew.bat`。
 
 ### 编译打包
 
@@ -101,26 +201,28 @@ gradlew.bat build
 
 产物位于 `build/libs/`：
 
-- `iqclauth-0.0.1-alpha.jar` — 模组主包（内含 BouncyCastle 嵌套 JAR）
-- `iqclauth-0.0.1-alpha-sources.jar` — 源码包
+- `iqclauth-0.1.0-beta.jar` — 模组主包（内含全部驱动嵌套 JAR：SQLite/MySQL/Postgres/MongoDB + HikariCP）
+- `iqclauth-0.1.0-beta-sources.jar` — 源码包
 
 ## 部署
 
 ### 1. 安装模组
 
-将 `iqclauth-0.0.1-alpha.jar` 放入：
+将 `iqclauth-0.1.0-beta.jar` 放入：
 
-| 端   | mods 目录            |
-| --- | ------------------ |
+| 端 | mods 目录 |
+| --- | --- |
 | 客户端 | `.minecraft/mods/` |
-| 服务端 | `<服务端目录>/mods/`    |
+| 服务端 | `<服务端目录>/mods/` |
 
 > 客户端与服务端均需安装本模组，且均需安装 [Fabric API](https://modrinth.com/mod/fabric-api)。
 > 客户端未安装本模组时，`/iqcl login pin` 指令将以明文发送至服务端，存在安全风险。
 
 ### 2. 配置服务端
 
-首次启动服务端后，会在 `config/iqclauth.json` 生成默认配置：
+首次启动服务端后，会在 `config/iqclauth.json` 生成默认配置。
+
+#### 2.1 必填：服务端身份密钥
 
 ```json
 {
@@ -128,40 +230,80 @@ gradlew.bat build
 }
 ```
 
-填入你的 `serverKey` （在[IQCL | 工单中心](https://www.iqcl.de5.net/tickets/)提交工单填入服务器包括能证明你是所有人的详尽信息后等待审核，审核通过后可以在[IQCL | 用户中心](https://www.iqcl.de5.net/auth/user/#pin)中兑换`serverKey`）后重启服务端：
+`serverKey` 获取流程：
 
-| 字段          | 说明                              |
-| ----------- | ------------------------------- |
-| `serverKey` | 服务端身份密钥，作为 `X-Server-Key` 请求头发送 |
+1. 在 **[IQCL | 工单中心](https://www.iqcl.de5.net/tickets/)** 提交工单，填入服务器信息及能证明你是所有人的详尽材料；
+2. 等待审核通过；
+3. 在 **[IQCL | 用户中心](https://www.iqcl.de5.net/auth/user/#pin)** 中兑换 `serverKey`；
+4. 填入 `config/iqclauth.json` 后重启服务端。
 
-密码登录相关配置（首次启动自动生成于同一 `config/iqclauth.json`）：
+`serverKey` 会作为 `X-Server-Key` 请求头发送给 `https://www.iqcl.de5.net`，用于服务端身份识别。
 
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `passwordLoginEnabled` | `true` | 是否启用密码登录功能 |
-| `promptIqclLinkAfterPasswordLogin` | `true` | 密码登录成功后是否提示关联 IQCL 账号 |
-| `passwordPolicy.minPasswordLength` | `8` | 密码最小长度 |
-| `passwordPolicy.maxPasswordLength` | `64` | 密码最大长度 |
-| `passwordPolicy.requireLetter` | `true` | 必须包含字母 |
-| `passwordPolicy.requireDigit` | `true` | 必须包含数字 |
-| `passwordPolicy.requireSpecialChar` | `false` | 必须包含特殊字符 |
-| `passwordPolicy.allowSpace` | `false` | 是否允许空格 |
-| `passwordPolicy.weakPasswordCheckLevel` | `1` | 弱密码检查级别（0=关，1=基础黑名单） |
-| `passwordHash.iterations` | `100000` | PBKDF2 迭代次数 |
-| `passwordHash.saltBytes` | `16` | 盐长度（字节） |
-| `loginAttempt.maxLoginAttempts` | `5` | 最大失败尝试次数 |
-| `loginAttempt.lockSeconds` | `300` | 锁定时长（秒） |
-| `loginAttempt.exponentialBackoff` | `true` | 指数退避（每次锁定翻倍） |
-| `loginAttempt.maxLockSeconds` | `3600` | 单次锁定上限（秒） |
-| `passwordStorage.backend` | `"sqlite"` | 存储后端（阶段1仅 sqlite，阶段3扩展 mysql/postgres/mongo） |
-| `passwordStorage.sqliteFile` | `"config/iqclauth/passwords.db"` | SQLite 数据库文件路径 |
+#### 2.2 远程 API 地址（硬编码常量，不可修改）
 
-> 验证服务器 API 地址已硬编码为 `https://www.iqcl.de5.net/api/verify-pin`（代码常量，不可修改）。
-> 配置仅服务端读取。客户端不需要配置（RSA 公钥与 Ed25519 公钥已硬编码于代码中）。
+```java
+public static final String VERIFY_API_URL        = "https://www.iqcl.de5.net/api/verify-pin";
+public static final String GAME_SESSION_LOGIN_URL = "https://www.iqcl.de5.net/api/game-session/login";
+public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/api/game-session/logout";
+```
+
+> 以上常量硬编码于 `ModConfig.java`，禁止修改，防止被篡改指向恶意服务器。客户端不需要配置（RSA / Ed25519 / X25519 公钥已硬编码于代码中）。
+
+#### 2.3 完整配置项
+
+| 分组 | 字段 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| 基础 | `serverKey` | `REPLACE_WITH_YOUR_X_SERVER_KEY` | 服务端身份密钥 |
+|  | `gracePeriodSeconds` | `15` | 进服宽限期（秒）。`-1`=关闭，`0`=立即限制 |
+|  | `loginTimeoutSeconds` | `300` | 未登录超时踢出（秒）。`0`=不限制 |
+|  | `sessionTimeoutSeconds` | `1800` | 已认证 session 超时（秒）。`0`=永不超时 |
+| 账号关联 | `requireLink` | `true` | PIN 验证成功后是否强制 `/iqcl link` 确认关联 |
+| Limbo 隔离区 | `limboEnabled` | `true` | 启用 Limbo（false 则原地冻结） |
+|  | `limboDimension` | `minecraft:overworld` | 隔离区维度 |
+|  | `limboX` / `limboY` / `limboZ` | `0` / `200` / `0` | 隔离区坐标（Y 建议 ≥200） |
+|  | `restoreOnLogin` | `true` | 登录后恢复物品 / 位置 / 朝向 |
+|  | `clearInventoryOnJoin` | `true` | 进服立即清空背包 |
+| 持久会话 | `persistentSession` | `true` | 同 IP 重连自动登录 |
+|  | `sessionMaxAgeSeconds` | `28800` | 会话有效期（8h）。`0`=永不过期 |
+|  | `trustIp` | `true` | 同 IP 自动恢复 |
+|  | `enableIpBinding` | `true` | IP 绑定（防异地登录） |
+| 单账号在线 | `singleAccountOnline` | `true` | 同账号禁止多设备同时在线 |
+| 未登录限制 | `restrictViewRotation` | `true` | 锁定视角 |
+|  | `restrictMovement` | `true` | 禁止移动 |
+|  | `restrictBlockBreak` | `true` | 禁止破坏方块 |
+|  | `restrictBlockAttack` | `true` | 禁止攻击方块 |
+|  | `restrictBlockUse` | `true` | 禁止放置 / 使用方块 / 打开容器 |
+|  | `restrictEntityInteract` | `true` | 禁止右键实体 |
+|  | `restrictEntityAttack` | `true` | 禁止攻击实体 |
+|  | `restrictItemUse` | `true` | 禁止使用物品 |
+|  | `restrictContainerOpen` | `true` | 强制关闭容器 GUI |
+|  | `restrictChatAndCommands` | `true` | 禁止除 `/iqcl` 外的聊天 / 命令 |
+| Game Session | `enableGameSessionApi` | `true` | 玩家登录 / 登出时通知 `www.iqcl.de5.net` |
+| 密码登录 | `passwordLoginEnabled` | `true` | 启用密码登录子命令 |
+|  | `promptIqclLinkAfterPasswordLogin` | `true` | 密码登录成功后提示关联 IQCL 账号 |
+| 密码策略 | `passwordPolicy.minPasswordLength` | `8` | 密码最小长度 |
+|  | `passwordPolicy.maxPasswordLength` | `64` | 密码最大长度 |
+|  | `passwordPolicy.requireLetter` | `true` | 必须包含字母 |
+|  | `passwordPolicy.requireDigit` | `true` | 必须包含数字 |
+|  | `passwordPolicy.requireSpecialChar` | `false` | 必须包含特殊字符 |
+|  | `passwordPolicy.allowSpace` | `false` | 是否允许空格 |
+|  | `passwordPolicy.weakPasswordCheckLevel` | `1` | 弱密码检查（0=关，1=基础黑名单） |
+| 密码哈希 | `passwordHash.iterations` | `100000` | PBKDF2 迭代次数 |
+|  | `passwordHash.saltBytes` | `16` | 盐长度（字节） |
+|  | `passwordHash.hashBits` | `256` | 哈希位数（PBKDF2WithHmacSHA256） |
+| 爆破防护 | `loginAttempt.maxLoginAttempts` | `5` | 最大失败次数 |
+|  | `loginAttempt.lockSeconds` | `300` | 锁定时长（秒） |
+|  | `loginAttempt.exponentialBackoff` | `true` | 指数退避 |
+|  | `loginAttempt.maxLockSeconds` | `3600` | 单次锁定上限（秒） |
+| 存储后端 | `passwordStorage.backend` | `sqlite` | `sqlite` / `mysql` / `postgres` / `mongo` |
+|  | `passwordStorage.sqliteFile` | `config/iqclauth/passwords.db` | SQLite 文件路径 |
+|  | `passwordStorage.mysqlHost` / `mysqlPort` / `mysqlDatabase` / `mysqlUser` / `mysqlPassword` / `mysqlTablePrefix` / `mysqlUseSsl` | `localhost` / `3306` / `iqclauth` / `iqclauth` / `""` / `iqclauth_` / `true` | MySQL 连接参数 |
+|  | `passwordStorage.postgresHost` / `postgresPort` / `postgresDatabase` / `postgresSchema` / `postgresUser` / `postgresPassword` | `localhost` / `5432` / `iqclauth` / `public` / `iqclauth` / `""` | PostgreSQL 连接参数 |
+|  | `passwordStorage.mongoUri` / `mongoHost` / `mongoPort` / `mongoDatabase` / `mongoCollection` | `""` / `localhost` / `27017` / `iqclauth` / `accounts` | MongoDB 连接参数（`mongoUri` 非空时优先） |
 
 ### 3. 使用
 
-#### PIN 登录（远程 IQCL 账号验证）
+#### 3.1 PIN 登录（远程 IQCL 账号验证）
 
 ```
 /iqcl login pin ABCD-EFGH-JKLM
@@ -169,13 +311,14 @@ gradlew.bat build
 
 模组将：
 
-1. 本地拦截该指令（明文不发送至服务端）
-2. RSA-OAEP 加密后通过自定义数据包发送
-3. 服务端转发至验证服务器
-4. 服务端验签后将结果回传客户端
-5. 聊天框显示 `[IQCL] PIN 验证成功，登录已放行` 或失败信息
+1. 客户端本地拦截该指令（明文不发送至服务端）；
+2. RSA-OAEP 加密后通过 `iqclauth:c2s_verify` 通道发送；
+3. 服务端转发至 `https://www.iqcl.de5.net/api/verify-pin`；
+4. 服务端对响应执行 Ed25519 验签后回传客户端；
+5. 聊天框显示 `[IQCL] PIN 验证成功，登录已放行` 或失败信息；
+6. 若 `requireLink=true`，需执行 `/iqcl link` 确认账号关联后才能最终登录。
 
-#### 密码登录（本服本地验证，借鉴 EasyAuth 思路）
+#### 3.2 密码登录（本服本地验证）
 
 ```
 # 首次使用：注册密码账号（与游戏 UUID 绑定）
@@ -190,35 +333,79 @@ gradlew.bat build
 # 注销密码账号（需已登录，需确认密码）
 /iqcl unregister password <密码>
 
-# 查看自身账号状态（密码账号 / IQCL 关联 / 当前认证）
+# 查看自身账号状态（密码账号 / IQCL 关联 / 当前认证 / TOTP）
 /iqcl account
 
 # 取消 PIN 待关联状态
 /iqcl cancel
 ```
 
-管理员命令（需 OP 2 级）：
+#### 3.3 TOTP 二次验证（RFC 6238，兼容 Google Authenticator）
 
 ```
-/iqcl admin unregister <玩家>        # 强制删除玩家密码账号
-/iqcl admin resetpassword <玩家>     # 重置玩家密码为临时随机串（输出给管理员）
-/iqcl admin reloadstorage            # 热重载存储后端配置（阶段3）
+# 开启 TOTP（输出二维码 / secret，扫码导入 Authenticator）
+/iqcl enablerotp
+
+# 确认开启（输入 Authenticator 当前 6 位码）
+/iqcl confirmtotp <code>
+
+# 关闭 TOTP（需密码确认）
+/iqcl disablerotp <密码>
 ```
 
-密码登录与 PIN 登录互通：
-- 任一方式登录后即解锁所有限制，并触发持久会话（同 IP 重连自动恢复）
-- 密码登录成功后若未关联 IQCL 账号，会提示执行 `/iqcl login pin` 关联（不强制）
-- 已关联 IQCL 账号的玩家也可用密码登录，登录后用关联的用户名通知 game-session API
-- 爆破防护：5 次失败后锁定 5 分钟（指数退避，封顶 1 小时）
+启用后，密码登录成功不会立即放行，会要求输入 `/iqcl login confirmtotp <code>`；PIN 登录若关联账号开启了 TOTP 也会触发。
+
+#### 3.4 会话与登出
+
+```
+# 主动登出（送回 Limbo，下次登录回到登出前位置）
+/iqcl logout
+
+# 查看自己 / 他人状态
+/iqcl status
+/iqcl status <player>      # OP 2
+
+# 管理员登出他人
+/iqcl logout <player>      # OP 2
+```
+
+> 启用 `persistentSession` 后，同 IP 在 `sessionMaxAgeSeconds` 内重连将自动恢复登录状态，无需再次输入凭证。若同时启用 `enableIpBinding`，IP 不一致会触发会话锁定，要求重新认证。
+
+#### 3.5 管理员命令（需 OP 2 级或服务端控制台）
+
+```
+/iqcl force <player>               # 绕过 PIN 验证强行登录
+/iqcl admin unregister <player>    # 强制删除玩家密码账号
+/iqcl admin resetpassword <player> # 重置玩家密码为临时随机串（输出给管理员）
+/iqcl admin reloadstorage          # 热重载存储后端配置（切换 SQLite→MySQL 等）
+```
+
+#### 3.6 关键行为规则
+
+- **单人/联机模式兼容**：模组自动检测运行环境（`EnvType.CLIENT` vs `EnvType.SERVER`）。在单人游戏或联机模式（集成服务器）下，模组会跳过所有服务端限制器、密码存储和网络处理器的注册，玩家不会被强制要求登录。进入游戏时会显示提示：
+  ```
+  ====================================
+  [IQCL] 当前处于单人/联机模式
+  IQCL Auth 登录功能仅在安装了该模组的专用服务器上可用
+  ====================================
+  ```
+  尝试 `/iqcl login` 等命令时会提示"当前处于单人/联机模式，IQCL Auth 登录需在安装了本模组的专用服务器上使用"。
+- **进服流程**：玩家加入 → 进服清空背包（若启用） → 传送至 Limbo 隔离区 → 宽限期内可自由活动 → 超过宽限期触发全部限制 → 登录超时未登录则踢出。
+- **登录恢复**：登录成功后，从快照恢复物品、坐标、朝向（不会丢失钻石装备，也不会被传送到出生点）。
+- **登出流程**：先快照当前位置 / 物品 → 通知客户端重置 → 传送回 Limbo。下次登录会回到登出前位置。
+- **防多开**：同一 IQCL 账号 / 同一 UUID 在新设备登录时，旧连接被踢下线。
+- **game-session 通知**：登录调用 `POST /api/game-session/login`，登出 / 断线调用 `POST /api/game-session/logout`，请求头携带 `X-Server-Key`，请求体包含 `mcUUID` 与可选 `username`。
+- **爆破防护**：5 次失败后锁定 5 分钟，指数退避封顶 1 小时。
+- **重复登录拦截**：登录成功后再次执行登录命令在客户端与服务端双层拦截。
 
 ## 验证服务器接口约定
 
-### 请求（MC 服务端 → 验证服务器）
+### 请求（MC 服务端 → `https://www.iqcl.de5.net/api/verify-pin`）
 
 ```
 POST /api/verify-pin
 Content-Type: application/json
-X-Server-Key: <配置的服务端密钥>
+X-Server-Key: <配置的 serverKey>
 ```
 
 请求体（客户端构造的完整密文包，原样转发）：
@@ -232,7 +419,7 @@ X-Server-Key: <配置的服务端密钥>
 }
 ```
 
-验证服务器需使用对应的 RSA-OAEP 私钥解密 `ciphertext`，得到：
+验证服务器使用对应 RSA-OAEP 私钥解密 `ciphertext`，得到：
 
 ```json
 {"pin":"ABCD-EFGH-JKLM","bindTarget":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}
@@ -257,49 +444,75 @@ X-Server-Key: <配置的服务端密钥>
 
 MC 服务端使用硬编码 Ed25519 公钥验签，验签失败直接拒绝登录。
 
+### game-session 接口
+
+```
+POST /api/game-session/login     # 玩家登录成功时调用
+POST /api/game-session/logout    # 玩家登出 / 断线时调用
+Header: X-Server-Key: <serverKey>
+Body:  { "mcUUID": "<玩家UUID>", "username": "<可选，玩家名>" }
+```
+
 ## 加密参数（不可修改）
 
-| 参数         | 值                  |
-| ---------- | ------------------ |
-| RSA 模长     | 2048 bit           |
-| RSA 填充     | OAEP               |
-| OAEP 哈希    | SHA-256            |
-| MGF1 哈希    | SHA-256            |
-| OAEP Label | 空                  |
-| Ed25519    | RFC 8032 标准        |
-| Nonce      | 32 位十六进制随机串（16 字节） |
-| 时间戳        | UTC 毫秒             |
+| 参数 | 值 |
+| --- | --- |
+| RSA 模长 | 2048 bit |
+| RSA 填充 | OAEP |
+| OAEP 哈希 | SHA-256 |
+| MGF1 哈希 | SHA-256 |
+| OAEP Label | 空 |
+| Ed25519 | RFC 8032 标准 |
+| X25519 | RFC 7748 标准 |
+| AES-GCM | 256 位密钥 + 96 位 IV + 128 位认证标签 |
+| PBKDF2 | HmacSHA256，100k 迭代，16 字节盐 |
+| TOTP | RFC 6238，30 秒步长，6 位数字 |
+| Nonce | 32 位十六进制随机串（16 字节） |
+| 时间戳 | UTC 毫秒 |
 
 ## 依赖
 
-| 依赖            | 版本               | 用途                 |
-| ------------- | ---------------- | ------------------ |
-| Minecraft     | 1.20.1           | —                  |
-| Fabric Loader | ≥0.15.11         | 模组加载器              |
-| Fabric API    | 0.92.2+1.20.1    | 事件、网络 API          |
-| SQLite JDBC   | 3.46.1.3         | 密码登录默认存储后端（嵌套 JAR） |
-| HikariCP      | 5.1.0            | JDBC 连接池（嵌套 JAR）   |
-| Java          | ≥17              | PBKDF2/RSA-OAEP/Ed25519 均由 JDK 内置 |
+| 依赖 | 版本 | 用途 | 打包方式 |
+| --- | --- | --- | --- |
+| Minecraft | 1.20.1 | — | — |
+| Fabric Loader | ≥0.15.0 | 模组加载器 | — |
+| Fabric API | 0.92.2+1.20.1 | 事件、网络、命令 API | — |
+| SQLite JDBC | 3.46.1.3 | 密码默认存储后端 | 嵌套 JAR |
+| HikariCP | 5.1.0 | JDBC 连接池 | 嵌套 JAR |
+| MySQL Connector/J | 8.3.0 | MySQL 存储后端 | 嵌套 JAR |
+| PostgreSQL JDBC | 42.7.3 | PostgreSQL 存储后端 | 嵌套 JAR |
+| MongoDB Driver Sync | 4.11.1 | MongoDB 存储后端 | 嵌套 JAR |
+| Java | ≥17 | RSA-OAEP / Ed25519 / X25519 / AES-GCM / PBKDF2 均由 JDK 内置 JCE 提供 | — |
+
+## 相关链接
+
+| 名称 | 地址 |
+| --- | --- |
+| 官方站点 / 主页 | <https://www.iqcl.de5.net> |
+| GitHub 仓库 | <https://github.com/IQCL/iqclauth> |
+| 工单中心（申请 serverKey） | <https://www.iqcl.de5.net/tickets/> |
+| 用户中心（兑换 serverKey / 管理 PIN） | <https://www.iqcl.de5.net/auth/user/#pin> |
+| PIN 验证 API | `https://www.iqcl.de5.net/api/verify-pin` |
+| Game Session API | `https://www.iqcl.de5.net/api/game-session/login`、`/api/game-session/logout` |
+| Issue 反馈 | <https://github.com/IQCL/iqclauth/issues> |
 
 ## 开源协议
 
-本项目
-**IQCLAuth** 采用 **Mozilla Public License 2.0 (MPL-2.0)**
+本项目 **IQCLAuth** 采用 **Mozilla Public License 2.0 (MPL-2.0)**。
 
 简单通俗说明：
 
 1. 任何人可以自由修改、分发、商用本项目代码；
-2. **如果你修改了本项目原有源码文件**，修改后的源码必须公开，保持MPL-2.0协议；
+2. **如果你修改了本项目原有源码文件**，修改后的源码必须公开，保持 MPL-2.0 协议；
 3. **独立新增的代码、新增类、拓展模块（全新文件）不受传染，可以闭源、私有、商用；**
 4. 衍生作品不强制整体开源，仅改动过的原始文件需要开源；
 5. 不允许移除源码内版权与协议声明。
 
-完整协议文本见项目根目录 LICENSE
-<https://mozilla.org/MPL/2.0/>
+完整协议文本见项目根目录 `LICENSE`：<https://mozilla.org/MPL/2.0/>
 
 ### 额外社区约束（非协议强制条款）
 
-禁止未经作者许可，修改内置公钥搭建仿冒IQCLAuth验证服务用于盈利。
+禁止未经作者许可，修改内置 RSA / Ed25519 / X25519 公钥搭建仿冒 IQCLAuth 验证服务（指向非 `www.iqcl.de5.net` 的域名）用于盈利。
 
 ## 免责声明
 

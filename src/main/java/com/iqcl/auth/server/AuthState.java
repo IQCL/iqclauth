@@ -129,6 +129,12 @@ public final class AuthState {
         return state != null && state.pendingDisplayId != null;
     }
 
+    /** 获取玩家的 IQCL 权限等级（trial/formal/banned，可能为 null）。 */
+    public static String getPermission(UUID uuid) {
+        PlayerAuthState state = STATES.get(uuid);
+        return state != null ? state.permission : null;
+    }
+
     /** 登出：清除认证状态，但保留关联信息（关联是永久性的）。 */
     public static void logout(ServerPlayerEntity player) {
         PlayerAuthState state = STATES.get(player.getUuid());
@@ -226,6 +232,12 @@ public final class AuthState {
         /** 是否已完成账号关联（/link 确认后为 true） */
         public volatile boolean linked;
 
+        // —— TOTP 双因素认证状态 ——
+        /** 密码已验证通过，等待 TOTP 验证码 */
+        public volatile boolean pendingTotp;
+        /** TOTP 验证通过后要执行的完成回调类型（password / pin） */
+        public volatile String totpPendingAction;
+
         PlayerAuthState(boolean authenticated, long joinMs, long lastActivityMs) {
             this.authenticated = authenticated;
             this.joinMs = joinMs;
@@ -236,6 +248,40 @@ public final class AuthState {
             this.linkedUsername = null;
             this.permission = null;
             this.linked = false;
+            this.pendingTotp = false;
+            this.totpPendingAction = null;
+        }
+    }
+
+    // ========== TOTP 待验证状态 ==========
+
+    /** 设置玩家进入待 TOTP 验证状态（密码已验证）。 */
+    public static void setPendingTotp(UUID uuid, String action) {
+        PlayerAuthState state = STATES.get(uuid);
+        if (state != null) {
+            state.pendingTotp = true;
+            state.totpPendingAction = action;
+        }
+    }
+
+    /** 玩家是否处于待 TOTP 验证状态。 */
+    public static boolean hasPendingTotp(UUID uuid) {
+        PlayerAuthState state = STATES.get(uuid);
+        return state != null && state.pendingTotp;
+    }
+
+    /** 获取待 TOTP 验证的动作类型。 */
+    public static String getTotpPendingAction(UUID uuid) {
+        PlayerAuthState state = STATES.get(uuid);
+        return state != null ? state.totpPendingAction : null;
+    }
+
+    /** 清除待 TOTP 验证状态。 */
+    public static void clearPendingTotp(UUID uuid) {
+        PlayerAuthState state = STATES.get(uuid);
+        if (state != null) {
+            state.pendingTotp = false;
+            state.totpPendingAction = null;
         }
     }
 }

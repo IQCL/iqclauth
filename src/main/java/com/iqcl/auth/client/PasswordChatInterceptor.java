@@ -148,7 +148,11 @@ public final class PasswordChatInterceptor {
         }
 
         if (!ClientPlayNetworking.canSend(NetworkConstants.C2S_PASSWORD_ID)) {
-            displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法执行密码操作");
+            if (IqclAuth.isClientEnvironment()) {
+                displayResult(false, "当前处于单人/联机模式，IQCL Auth 登录需在安装了本模组的专用服务器上使用");
+            } else {
+                displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法执行密码操作");
+            }
             return false;
         }
 

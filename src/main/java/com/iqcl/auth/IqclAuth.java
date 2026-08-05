@@ -9,13 +9,16 @@ package com.iqcl.auth;
 
 import com.iqcl.auth.config.ModConfig;
 import com.iqcl.auth.password.PasswordManager;
+import com.iqcl.auth.context.LuckPermsContextProvider;
 import com.iqcl.auth.password.crypto.ServerKeyStore;
 import com.iqcl.auth.password.net.PasswordNetworkHandler;
 import com.iqcl.auth.server.CommandRegistry;
 import com.iqcl.auth.server.PlayerRestrictionManager;
 import com.iqcl.auth.server.ServerNetworkHandler;
+import net.fabricmc.api.EnvType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,32 +39,43 @@ public class IqclAuth implements ModInitializer {
     public static final String MOD_ID = "iqclauth";
     public static final Logger LOGGER = LoggerFactory.getLogger("IQCLAuth");
 
+    private static boolean clientEnvironment;
+
+    /** 是否运行在客户端环境（单人游戏/联机模式）。 */
+    public static boolean isClientEnvironment() {
+        return clientEnvironment;
+    }
+
     @Override
     public void onInitialize() {
-        LOGGER.info("[IQCL Auth] 初始化（公共/服务端侧）...");
+        EnvType envType = FabricLoader.getInstance().getEnvironmentType();
+        clientEnvironment = (envType == EnvType.CLIENT);
 
-        // 加载服务端配置
+        if (clientEnvironment) {
+            LOGGER.warn("[IQCL Auth] 检测到客户端环境（单人游戏/联机模式）");
+            LOGGER.warn("[IQCL Auth] IQCL Auth 登录功能仅在安装了该模组的专用服务器上可用");
+            LOGGER.warn("[IQCL Auth] 已跳过服务端限制器、密码存储、网络处理器注册");
+
+            ModConfig.load();
+
+            ServerLifecycleEvents.SERVER_STOPPING.register(server ->
+                    LOGGER.info("[IQCL Auth] 服务端停机"));
+
+            return;
+        }
+
+        // === 专用服务器模式 ===
+        LOGGER.info("[IQCL Auth] 初始化（专用服务端）...");
+
         ModConfig.load();
-
-        // 注册 /iqcl 指令（支持 Tab 补全，不限管理员）
         CommandRegistry.register();
-
-        // 注册服务端数据包接收器（密文转发 + 验签）
         ServerNetworkHandler.register();
-
-        // 注册玩家行为限制器（未登录限制移动/破坏 + 超时踢出）
         PlayerRestrictionManager.register();
-
-        // 初始化密码登录存储后端 + 异步执行器
         PasswordManager.init();
-
-        // 初始化服务端 X25519 密钥对（用于客户端→服务端密码密文 ECDH 密钥交换）
+        LuckPermsContextProvider.register();
         ServerKeyStore.init();
-
-        // 注册密码密文包接收器
         PasswordNetworkHandler.register();
 
-        // 服务端停机时关闭密码存储连接池
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             LOGGER.info("[IQCL Auth] 服务端停机，关闭密码存储后端...");
             PasswordManager.shutdown();

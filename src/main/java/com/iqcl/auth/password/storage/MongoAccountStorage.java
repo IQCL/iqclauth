@@ -128,6 +128,28 @@ public final class MongoAccountStorage implements AccountStorage {
     }
 
     @Override
+    public void updateTotp(UUID uuid, boolean enabled, String secret, String lastCode, long updatedAtMs)
+            throws StorageException {
+        Document filter = new Document("uuid", uuid.toString());
+        Document update = new Document("$set", new Document()
+                .append("totpEnabled", enabled)
+                .append("totpSecret", secret)
+                .append("totpLastCode", lastCode)
+                .append("updatedAtMs", updatedAtMs));
+        com.mongodb.client.result.UpdateResult result = collection.updateOne(filter, update);
+        if (result.getMatchedCount() == 0) {
+            throw new StorageException("更新 TOTP 失败：账号不存在");
+        }
+    }
+
+    @Override
+    public void updateTotpLastCode(UUID uuid, String lastCode) throws StorageException {
+        Document filter = new Document("uuid", uuid.toString());
+        Document update = new Document("$set", new Document("totpLastCode", lastCode));
+        collection.updateOne(filter, update);
+    }
+
+    @Override
     public void delete(UUID uuid) {
         collection.deleteOne(new Document("uuid", uuid.toString()));
     }
@@ -146,6 +168,9 @@ public final class MongoAccountStorage implements AccountStorage {
         doc.append("iterations", r.iterations);
         doc.append("createdAtMs", r.createdAtMs);
         doc.append("updatedAtMs", r.updatedAtMs);
+        doc.append("totpEnabled", r.totpEnabled);
+        doc.append("totpSecret", r.totpSecret);
+        doc.append("totpLastCode", r.totpLastCode);
         return doc;
     }
 
@@ -157,6 +182,9 @@ public final class MongoAccountStorage implements AccountStorage {
         Integer iterations = doc.getInteger("iterations");
         Long createdAtMs = doc.getLong("createdAtMs");
         Long updatedAtMs = doc.getLong("updatedAtMs");
+        Boolean totpEnabled = doc.getBoolean("totpEnabled", false);
+        String totpSecret = doc.getString("totpSecret");
+        String totpLastCode = doc.getString("totpLastCode");
         return new AccountRecord(
                 UUID.fromString(uuidStr),
                 username,
@@ -164,6 +192,10 @@ public final class MongoAccountStorage implements AccountStorage {
                 hashBin.getData(),
                 iterations != null ? iterations : 100_000,
                 createdAtMs != null ? createdAtMs : 0L,
-                updatedAtMs != null ? updatedAtMs : 0L);
+                updatedAtMs != null ? updatedAtMs : 0L,
+                totpEnabled != null && totpEnabled,
+                totpSecret,
+                totpLastCode
+        );
     }
 }

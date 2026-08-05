@@ -114,7 +114,11 @@ public final class PinChatInterceptor {
 
         // 检查与服务端的模组通道是否可用
         if (!ClientPlayNetworking.canSend(NetworkConstants.C2S_VERIFY_ID)) {
-            displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法验证 PIN");
+            if (IqclAuth.isClientEnvironment()) {
+                displayResult(false, "当前处于单人/联机模式，IQCL Auth 登录需在安装了本模组的专用服务器上使用");
+            } else {
+                displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法验证 PIN");
+            }
             return false;
         }
 

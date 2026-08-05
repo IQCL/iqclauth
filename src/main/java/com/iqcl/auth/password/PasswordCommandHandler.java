@@ -184,6 +184,7 @@ public final class PasswordCommandHandler {
         boolean authed = AuthState.isAuthenticated(player.getUuid());
         boolean linked = AuthState.isLinked(player.getUuid());
         boolean registered = PasswordManager.isRegisteredSync(player.getUuid());
+        boolean totpEnabled = PasswordManager.isTotpEnabledSync(player.getUuid());
 
         player.sendMessage(
                 Text.literal("====================================")
@@ -212,6 +213,20 @@ public final class PasswordCommandHandler {
                                 ? Text.literal("已关联").formatted(Formatting.GREEN)
                                 : Text.literal("未关联").formatted(Formatting.YELLOW)),
                 false);
+        if (registered) {
+            player.sendMessage(
+                    Text.literal("  TOTP 双因素: ")
+                            .formatted(Formatting.WHITE)
+                            .append(totpEnabled
+                                    ? Text.literal("已启用").formatted(Formatting.GREEN)
+                                    : Text.literal("未启用").formatted(Formatting.YELLOW)),
+                    false);
+            if (!totpEnabled && authed) {
+                player.sendMessage(
+                        Text.literal("  建议启用 TOTP: /iqcl enablerotp")
+                                .formatted(Formatting.AQUA), false);
+            }
+        }
         player.sendMessage(
                 Text.literal("====================================")
                         .formatted(Formatting.GOLD), false);
@@ -315,5 +330,132 @@ public final class PasswordCommandHandler {
                     .formatted(Formatting.RED));
             return 0;
         }
+    }
+
+    // ========== TOTP 双因素认证命令 ==========
+
+    /** {@code /iqcl enablerotp} — 启用 TOTP 双因素认证（生成密钥+URI）。 */
+    public static int executeEnableTotp(CommandContext<ServerCommandSource> context) {
+        ServerPlayerEntity player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendError(Text.literal("此命令只能由玩家执行")
+                    .formatted(Formatting.RED));
+            return 0;
+        }
+        if (!PasswordManager.isAvailable()) {
+            player.sendMessage(Text.literal("[IQCL] 密码登录服务暂不可用")
+                    .formatted(Formatting.RED), false);
+            return 0;
+        }
+
+        player.sendMessage(
+                Text.literal("[IQCL] 正在生成 TOTP 密钥...")
+                        .formatted(Formatting.YELLOW), false);
+
+        PasswordManager.enableTotp(player.getServer(), player, result -> {
+            if (result.success) {
+                player.sendMessage(Text.literal("====================================")
+                        .formatted(Formatting.GOLD), false);
+                player.sendMessage(Text.literal("[IQCL] TOTP 双因素认证 - 扫码或手动配置")
+                        .formatted(Formatting.GOLD, Formatting.BOLD), false);
+                player.sendMessage(Text.literal("  密钥 (Base32): " + result.secret)
+                        .formatted(Formatting.WHITE), false);
+                player.sendMessage(Text.literal("  URI: " + result.otpUri)
+                        .formatted(Formatting.AQUA), false);
+                player.sendMessage(Text.literal("====================================")
+                        .formatted(Formatting.GOLD), false);
+                player.sendMessage(Text.literal("[IQCL] 请使用 Google Authenticator 等 App 扫描二维码或手动输入密钥")
+                        .formatted(Formatting.YELLOW), false);
+                player.sendMessage(Text.literal("[IQCL] 扫码后输入 /iqcl confirmtotp <6位验证码> 完成启用")
+                        .formatted(Formatting.AQUA), false);
+            } else {
+                player.sendMessage(Text.literal("[IQCL] " + result.message)
+                        .formatted(Formatting.RED), false);
+            }
+        });
+        return 1;
+    }
+
+    /** {@code /iqcl confirmtotp <code>} — 确认启用 TOTP（扫码后验证第一个码）。 */
+    public static int executeConfirmTotp(CommandContext<ServerCommandSource> context) {
+        ServerPlayerEntity player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendError(Text.literal("此命令只能由玩家执行")
+                    .formatted(Formatting.RED));
+            return 0;
+        }
+        if (!PasswordManager.isAvailable()) {
+            player.sendMessage(Text.literal("[IQCL] 密码登录服务暂不可用")
+                    .formatted(Formatting.RED), false);
+            return 0;
+        }
+
+        String code = context.getArgument("code", String.class);
+
+        player.sendMessage(
+                Text.literal("[IQCL] 正在验证 TOTP 码...")
+                        .formatted(Formatting.YELLOW), false);
+
+        PasswordManager.confirmTotp(player.getServer(), player, code, null);
+        return 1;
+    }
+
+    /** {@code /iqcl disablerotp <password>} — 禁用 TOTP（需密码验证）。 */
+    public static int executeDisableTotp(CommandContext<ServerCommandSource> context) {
+        ServerPlayerEntity player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendError(Text.literal("此命令只能由玩家执行")
+                    .formatted(Formatting.RED));
+            return 0;
+        }
+        if (!PasswordManager.isAvailable()) {
+            player.sendMessage(Text.literal("[IQCL] 密码登录服务暂不可用")
+                    .formatted(Formatting.RED), false);
+            return 0;
+        }
+
+        String password = context.getArgument("password", String.class);
+
+        player.sendMessage(
+                Text.literal("[IQCL] 正在禁用 TOTP...")
+                        .formatted(Formatting.YELLOW), false);
+
+        PasswordManager.disableTotp(player.getServer(), player, password, null);
+        return 1;
+    }
+
+    // ========== login confirmtotp ==========
+
+    /** {@code /iqcl login confirmtotp <code>} — TOTP 双因素验证完成登录。 */
+    public static int executeLoginConfirmTotp(CommandContext<ServerCommandSource> context) {
+        if (!ModConfig.get().passwordLoginEnabled) {
+            context.getSource().sendError(Text.literal("[IQCL] 密码登录功能未启用")
+                    .formatted(Formatting.RED));
+            return 0;
+        }
+        ServerPlayerEntity player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendError(Text.literal("此命令只能由玩家执行")
+                    .formatted(Formatting.RED));
+            return 0;
+        }
+
+        if (!AuthState.hasPendingTotp(player.getUuid())) {
+            player.sendMessage(
+                    Text.literal("[IQCL] 你当前没有待完成的 TOTP 验证，请先 /iqcl login password <密码>")
+                            .formatted(Formatting.YELLOW),
+                    false);
+            return 0;
+        }
+
+        String code = context.getArgument("code", String.class);
+
+        player.sendMessage(
+                Text.literal("[IQCL] TOTP 验证中...")
+                        .formatted(Formatting.YELLOW),
+                false);
+
+        PasswordManager.confirmTotpLogin(player.getServer(), player, code, null);
+        return 1;
     }
 }

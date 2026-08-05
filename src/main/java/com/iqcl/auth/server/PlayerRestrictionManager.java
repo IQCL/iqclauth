@@ -2,6 +2,8 @@ package com.iqcl.auth.server;
 
 import com.iqcl.auth.IqclAuth;
 import com.iqcl.auth.config.ModConfig;
+import com.iqcl.auth.network.NetworkConstants;
+import com.iqcl.auth.password.crypto.ServerKeyStore;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
@@ -151,6 +153,9 @@ public final class PlayerRestrictionManager {
 
         ModConfig config = ModConfig.get();
 
+        // —— 推送 AUTHINFO 给客户端：X25519 公钥 + 密码登录开关 ——
+        sendAuthInfo(player, config);
+
         // —— 持久会话检查（在 sendToLimbo 之前！）——
         if (config.persistentSession) {
             boolean autoLoggedIn = PlayerSessionManager.tryPersistentSession(player);
@@ -244,6 +249,23 @@ public final class PlayerRestrictionManager {
         player.sendMessage(
                 Text.literal("====================================")
                         .formatted(Formatting.GOLD), false);
+    }
+
+    /**
+     * 向玩家的客户端推送 AUTHINFO：
+     *  1) 服务端 X25519 公钥（客户端用于密码命令 ECDH 加密）
+     *  2) 密码登录开关
+     *  若玩家网络通道未就绪（过早调用），数据包会被 Fabric 缓存，不会丢失。
+     */
+    private static void sendAuthInfo(ServerPlayerEntity player, ModConfig config) {
+        String pub = ServerKeyStore.getPublicKeyBase64();
+        // 即使公钥未就绪也发送，让客户端明确知道加密通道不可用（退化为服务端明文命令）
+        net.minecraft.network.PacketByteBuf buf =
+                net.fabricmc.fabric.api.networking.v1.PacketByteBufs.create();
+        buf.writeString(pub != null ? pub : "");
+        buf.writeBoolean(config.passwordLoginEnabled);
+        net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(
+                player, NetworkConstants.S2C_AUTHINFO_ID, buf);
     }
 
     /** 玩家离开 → 清理会话 + 通知 game-session logout。 */

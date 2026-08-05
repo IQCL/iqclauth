@@ -9,6 +9,8 @@ package com.iqcl.auth;
 
 import com.iqcl.auth.config.ModConfig;
 import com.iqcl.auth.password.PasswordManager;
+import com.iqcl.auth.password.crypto.ServerKeyStore;
+import com.iqcl.auth.password.net.PasswordNetworkHandler;
 import com.iqcl.auth.server.CommandRegistry;
 import com.iqcl.auth.server.PlayerRestrictionManager;
 import com.iqcl.auth.server.ServerNetworkHandler;
@@ -52,6 +54,12 @@ public class IqclAuth implements ModInitializer {
 
         // 初始化密码登录存储后端 + 异步执行器
         PasswordManager.init();
+
+        // 初始化服务端 X25519 密钥对（用于客户端→服务端密码密文 ECDH 密钥交换）
+        ServerKeyStore.init();
+
+        // 注册密码密文包接收器
+        PasswordNetworkHandler.register();
 
         // 服务端停机时关闭密码存储连接池
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {

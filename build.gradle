@@ -43,6 +43,15 @@ dependencies {
     // HikariCP 连接池（JDBC 连接管理）
     implementation "com.zaxxer:HikariCP:5.1.0"
     include "com.zaxxer:HikariCP:5.1.0"
+    // MySQL 驱动（可选存储后端）
+    implementation "com.mysql:mysql-connector-j:8.3.0"
+    include "com.mysql:mysql-connector-j:8.3.0"
+    // PostgreSQL 驱动（可选存储后端）
+    implementation "org.postgresql:postgresql:42.7.3"
+    include "org.postgresql:postgresql:42.7.3"
+    // MongoDB 同步驱动（可选存储后端）
+    implementation "org.mongodb:mongodb-driver-sync:4.11.1"
+    include "org.mongodb:mongodb-driver-sync:4.11.1"
 }
 
 processResources {

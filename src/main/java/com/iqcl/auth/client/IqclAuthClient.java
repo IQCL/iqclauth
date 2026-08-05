@@ -34,13 +34,20 @@ public class IqclAuthClient implements ClientModInitializer {
         // 注册 /iqcl login pin <pin> 拦截 + RSA 加密 + 自定义数据包发送
         PinChatInterceptor.register();
 
-        // 注册服务端 → 客户端结果接收器
+        // 注册密码命令拦截器：login/register/changepassword/unregister 均本地 ECDH+AES-GCM 加密
+        PasswordChatInterceptor.register();
+
+        // 注册服务端 → 客户端结果接收器（PIN 与密码登录共用，按消息内容区分）
         ClientPlayNetworking.registerGlobalReceiver(
                 NetworkConstants.S2C_RESULT_ID,
                 (client, handler, buf, responseSender) -> {
                     boolean success = buf.readBoolean();
                     String message = buf.readString();
-                    client.execute(() -> PinChatInterceptor.displayResult(success, message));
+                    client.execute(() -> {
+                        // 两个拦截器的 displayResult 都会更新 ClientAuthState
+                        PinChatInterceptor.displayResult(success, message);
+                        PasswordChatInterceptor.displayResult(success, message);
+                    });
                 });
 
         // 注册服务端 → 客户端登出通知接收器
@@ -48,7 +55,7 @@ public class IqclAuthClient implements ClientModInitializer {
                 NetworkConstants.S2C_LOGOUT_ID,
                 (client, handler, buf, responseSender) -> {
                     client.execute(() -> {
-                        PinChatInterceptor.resetAuth();
+                        ClientAuthState.reset();
                         MinecraftClient mc = MinecraftClient.getInstance();
                         if (mc.player != null) {
                             mc.player.sendMessage(
@@ -56,6 +63,19 @@ public class IqclAuthClient implements ClientModInitializer {
                                             .formatted(net.minecraft.util.Formatting.GRAY),
                                     false);
                         }
+                    });
+                });
+
+        // 注册服务端 → 客户端 AUTHINFO 接收器：接收服务端 X25519 公钥 + 功能开关
+        ClientPlayNetworking.registerGlobalReceiver(
+                NetworkConstants.S2C_AUTHINFO_ID,
+                (client, handler, buf, responseSender) -> {
+                    String pub = buf.readString();
+                    boolean passwordEnabled = buf.readBoolean();
+                    client.execute(() -> {
+                        PasswordChatInterceptor.serverPublicKeyBase64 = pub;
+                        IqclAuth.LOGGER.info("[IQCL Auth] 已接收服务端 X25519 公钥，密码登录加密通道可用={}",
+                                passwordEnabled);
                     });
                 });
 

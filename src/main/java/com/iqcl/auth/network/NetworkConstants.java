@@ -29,4 +29,10 @@ public final class NetworkConstants {
 
     /** 服务端 → 客户端：通知客户端登出（重置本地认证状态）。 */
     public static final Identifier S2C_LOGOUT_ID = new Identifier(MOD_ID, "s2c_logout");
+
+    /** 客户端 → 服务端：密码操作密文包（login/register/changepassword/unregister，X25519+AES-GCM 加密）。 */
+    public static final Identifier C2S_PASSWORD_ID = new Identifier(MOD_ID, "c2s_password");
+
+    /** 服务端 → 客户端：推送服务端 X25519 公钥 + 功能开关（玩家加入时发送）。 */
+    public static final Identifier S2C_AUTHINFO_ID = new Identifier(MOD_ID, "s2c_authinfo");
 }

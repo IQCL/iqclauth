@@ -380,6 +380,78 @@ public final class PlayerSessionManager {
     }
 
     /**
+     * 登出玩家：先快照当前位置/物品，再传送回 Limbo。
+     * 下次登录时 {@link #restoreFromLimbo} 会根据此快照回到登出前的位置。
+     *
+     * @param clearInventory 是否在送入 Limbo 时清空背包（与 ModConfig.clearInventoryOnJoin 一致）
+     */
+    public static void logoutToLimbo(ServerPlayerEntity player, boolean clearInventory) {
+        // —— 1) 先快照当前位置/物品（必须在 sendToLimbo 清空背包之前）——
+        PlayerSnapshot snapshot = new PlayerSnapshot();
+        snapshot.pos = player.getPos();
+        snapshot.yaw = player.getYaw();
+        snapshot.pitch = player.getPitch();
+        snapshot.worldId = player.getWorld().getRegistryKey().getValue().toString();
+        snapshot.items = new ArrayList<>();
+        PlayerInventory inv = player.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            snapshot.items.add(inv.getStack(i).copy());
+        }
+        snapshot.heldItemIndex = inv.selectedSlot;
+        JOIN_SNAPSHOTS.put(player.getUuid(), snapshot);
+        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 登出前快照位置: {}",
+                player.getEntityName(), snapshot.pos);
+
+        // —— 2) 传送回 Limbo ——
+        sendToLimboInternal(player, clearInventory);
+
+        // —— 3) 标记未登录状态 ——
+        AuthState.logout(player);
+        removeAccountBinding(player);
+        // 保留持久会话供重连自动恢复
+    }
+
+    /**
+     * 仅内部使用的 Limbo 传送（不打日志、不修改 AuthState）。
+     */
+    private static void sendToLimboInternal(ServerPlayerEntity player, boolean clearInventory) {
+        ModConfig config = ModConfig.get();
+        if (!config.limboEnabled) return;
+
+        ServerWorld world = player.getServerWorld();
+        int bx = config.limboX;
+        int by = config.limboY;
+        int bz = config.limboZ;
+
+        // 安全平台
+        BlockPos centerPos = new BlockPos(bx, by, bz);
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                BlockPos floorPos = centerPos.add(dx, -1, dz);
+                if (world.getBlockState(floorPos).isAir()) {
+                    world.setBlockState(floorPos, Blocks.STONE.getDefaultState());
+                }
+            }
+        }
+        BlockPos glassPos = centerPos.add(0, -1, 0);
+        world.setBlockState(glassPos, Blocks.GLASS.getDefaultState());
+
+        player.networkHandler.requestTeleport(bx + 0.5, by, bz + 0.5, 0f, 0f);
+        player.setVelocity(Vec3d.ZERO);
+        player.fallDistance = 0f;
+        player.setNoGravity(true);
+
+        if (clearInventory) {
+            PlayerInventory inv = player.getInventory();
+            for (int i = 0; i < inv.size(); i++) {
+                inv.setStack(i, ItemStack.EMPTY);
+            }
+        }
+
+        LIMBO_PLAYERS.add(player.getUuid());
+    }
+
+    /**
      * 移除玩家的单账号绑定（登出时调用）。
      */
     public static void removeAccountBinding(ServerPlayerEntity player) {

@@ -37,16 +37,13 @@ public final class AccountStorageFactory {
                 return createSqlite(cfg);
             case "mysql":
             case "mariadb":
-                // 阶段 3 实现
-                throw new UnsupportedOperationException("MySQL 后端将在阶段 3 实现");
+                return new MysqlAccountStorage(cfg);
             case "postgres":
             case "postgresql":
-                // 阶段 3 实现
-                throw new UnsupportedOperationException("PostgreSQL 后端将在阶段 3 实现");
+                return new PostgresAccountStorage(cfg);
             case "mongo":
             case "mongodb":
-                // 阶段 3 实现
-                throw new UnsupportedOperationException("MongoDB 后端将在阶段 3 实现");
+                return new MongoAccountStorage(cfg);
             default:
                 throw new IllegalArgumentException("未知存储后端: " + backend);
         }

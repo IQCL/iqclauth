@@ -249,20 +249,20 @@ public final class CommandRegistry {
                     false);
             return 0;
         }
-        AuthState.logout(player);
-        PlayerSessionManager.removeAccountBinding(player);
-        PlayerSessionManager.removeSession(player.getUuid());
         LoginAttemptLimiter.reset(player.getUuid());
-
-        // 通知客户端重置本地认证状态
+        // 先通知客户端重置本地认证状态（在传送前发送，避免传送延迟丢包）
         PacketByteBuf buf = PacketByteBufs.create();
         ServerPlayNetworking.send(player, NetworkConstants.S2C_LOGOUT_ID, buf);
+        // 清理会话记录
+        PlayerSessionManager.removeSession(player.getUuid());
+        // 登出：先快照当前位置/物品 → 再传送回 Limbo（下次登录可回到登出前位置）
+        PlayerSessionManager.logoutToLimbo(player, ModConfig.get().clearInventoryOnJoin);
 
         player.sendMessage(
-                Text.literal("[IQCL] 已成功登出，请重新输入 /iqcl login pin <PIN码> 或 /iqcl login password <密码> 登录")
+                Text.literal("[IQCL] 已成功登出，你已被送回未登录区。请重新输入 /iqcl login pin <PIN码> 或 /iqcl login password <密码> 登录")
                         .formatted(Formatting.GREEN),
                 false);
-        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已登出", player.getEntityName());
+        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已登出并送回 Limbo", player.getEntityName());
         return 1;
     }
 
@@ -279,23 +279,23 @@ public final class CommandRegistry {
                             .formatted(Formatting.YELLOW), false);
             return 0;
         }
-        AuthState.logout(target);
-        PlayerSessionManager.removeAccountBinding(target);
-        PlayerSessionManager.removeSession(target.getUuid());
         LoginAttemptLimiter.reset(target.getUuid());
-
-        // 通知目标客户端重置本地认证状态
+        // 先通知客户端重置本地认证状态
         PacketByteBuf buf = PacketByteBufs.create();
         ServerPlayNetworking.send(target, NetworkConstants.S2C_LOGOUT_ID, buf);
+        // 清理会话记录
+        PlayerSessionManager.removeSession(target.getUuid());
+        // 登出：先快照当前位置/物品 → 再传送回 Limbo
+        PlayerSessionManager.logoutToLimbo(target, ModConfig.get().clearInventoryOnJoin);
 
         source.sendFeedback(() ->
-                Text.literal("[IQCL] 已登出玩家 " + target.getEntityName())
+                Text.literal("[IQCL] 已登出玩家 " + target.getEntityName() + " 并送回未登录区")
                         .formatted(Formatting.GREEN), false);
         target.sendMessage(
-                Text.literal("[IQCL] 你已被管理员登出，请重新输入 /iqcl login pin <PIN码> 或 /iqcl login password <密码> 登录")
+                Text.literal("[IQCL] 你已被管理员登出并送回未登录区，请重新输入 /iqcl login pin <PIN码> 或 /iqcl login password <密码> 登录")
                         .formatted(Formatting.RED),
                 false);
-        IqclAuth.LOGGER.info("[IQCL Auth] 管理员 {} 登出玩家 {}",
+        IqclAuth.LOGGER.info("[IQCL Auth] 管理员 {} 登出玩家 {} 并送回 Limbo",
                 source.getName(), target.getEntityName());
         return 1;
     }

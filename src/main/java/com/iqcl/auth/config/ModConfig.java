@@ -276,7 +276,9 @@ public class ModConfig {
         public String postgresPassword = "";
 
         // —— MongoDB ——
-        public String mongoUri = "mongodb://localhost:27017";
+        public String mongoUri = "";
+        public String mongoHost = "localhost";
+        public int mongoPort = 27017;
         public String mongoDatabase = "iqclauth";
         public String mongoCollection = "accounts";
     }

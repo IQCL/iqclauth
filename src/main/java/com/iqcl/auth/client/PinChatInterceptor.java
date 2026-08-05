@@ -41,9 +41,6 @@ import java.util.regex.Pattern;
  */
 public final class PinChatInterceptor {
 
-    /** 本地认证状态（客户端记录，防止重复登录请求）。 */
-    private static volatile boolean authenticated = false;
-
     /** 命令路径匹配（无前导 /）：iqcl login pin <pin> */
     private static final Pattern PIN_COMMAND =
             Pattern.compile("^iqcl\\s+login\\s+pin\\s+(\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
@@ -101,7 +98,7 @@ public final class PinChatInterceptor {
         }
 
         // —— 已登录检查：已认证玩家再次提交 PIN 直接拒绝 ——
-        if (authenticated) {
+        if (ClientAuthState.isAuthenticated()) {
             player.sendMessage(
                     Text.literal("[IQCL] 你已经登录成功，无需重复验证")
                             .formatted(Formatting.YELLOW),
@@ -181,7 +178,7 @@ public final class PinChatInterceptor {
     /** 在客户端聊天框展示最终结果。 */
     public static void displayResult(boolean success, String message) {
         // 同步本地认证状态
-        authenticated = success;
+        ClientAuthState.setAuthenticated(success);
 
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player != null) {
@@ -194,11 +191,11 @@ public final class PinChatInterceptor {
 
     /** 是否已在客户端本地记录为已认证。 */
     public static boolean isAuthenticated() {
-        return authenticated;
+        return ClientAuthState.isAuthenticated();
     }
 
     /** 重置本地认证状态（登出时调用）。 */
     public static void resetAuth() {
-        authenticated = false;
+        ClientAuthState.reset();
     }
 }

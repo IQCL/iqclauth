@@ -25,11 +25,20 @@ public final class AuthState {
     private AuthState() {
     }
 
-    /** 记录玩家加入（尚未认证）。彻底重置所有状态，防止残留。 */
+    /** 记录玩家加入（尚未认证）。从磁盘加载已保存的关联信息。 */
     public static void onPlayerJoin(ServerPlayerEntity player) {
         long now = System.currentTimeMillis();
-        // 彻底重置：所有关联信息、权限、状态全部清空
-        STATES.put(player.getUuid(), new PlayerAuthState(false, now, now));
+        PlayerAuthState state = new PlayerAuthState(false, now, now);
+
+        // 从磁盘加载关联信息
+        LinkStore.LinkData linkData = LinkStore.load(player.getUuid());
+        if (linkData != null && linkData.displayId != null) {
+            state.linkedDisplayId = linkData.displayId;
+            state.linkedUsername = linkData.username;
+            state.linked = true;
+        }
+
+        STATES.put(player.getUuid(), state);
     }
 
     /** 记录玩家离线，清理状态。 */
@@ -50,7 +59,9 @@ public final class AuthState {
     }
 
     /**
-     * 标记玩家已通过 PIN 验证，并保存 IQCL 账号信息供 /link 使用。
+     * 标记玩家 PIN 验证通过，保存 IQCL 账号信息供 /link 使用。
+     * 注意：此方法不设置 authenticated=true，玩家仍处于"待关联"状态，
+     * 需要执行 /iqcl link 后才算真正登录。
      *
      * @param displayId    IQCL 显示 ID（可为 null）
      * @param username     IQCL 用户名（可为 null）
@@ -61,14 +72,14 @@ public final class AuthState {
                                                String permission) {
         PlayerAuthState state = STATES.get(player.getUuid());
         if (state != null) {
-            state.authenticated = true;
+            // 不设置 authenticated=true，玩家处于待关联状态
             state.lastActivityMs = System.currentTimeMillis();
             state.pendingDisplayId = displayId;
             state.pendingUsername = username;
             state.permission = permission;
         } else {
             long now = System.currentTimeMillis();
-            PlayerAuthState newState = new PlayerAuthState(true, now, now);
+            PlayerAuthState newState = new PlayerAuthState(false, now, now);
             newState.pendingDisplayId = displayId;
             newState.pendingUsername = username;
             newState.permission = permission;
@@ -77,7 +88,7 @@ public final class AuthState {
     }
 
     /**
-     * 确认账号关联：将 pending 账户信息标记为已关联。
+     * 确认账号关联：将 pending 账户信息标记为已关联，并持久化到磁盘。
      */
     public static void confirmLink(UUID uuid) {
         PlayerAuthState state = STATES.get(uuid);
@@ -87,6 +98,11 @@ public final class AuthState {
             state.linked = true;
             state.pendingDisplayId = null;
             state.pendingUsername = null;
+
+            // 持久化到磁盘
+            if (state.linkedDisplayId != null) {
+                LinkStore.save(uuid, state.linkedDisplayId, state.linkedUsername);
+            }
         }
     }
 
@@ -113,11 +129,21 @@ public final class AuthState {
         return state != null && state.pendingDisplayId != null;
     }
 
-    /** 登出：彻底重置为未认证状态，清除所有关联信息。 */
+    /** 登出：清除认证状态，但保留关联信息（关联是永久性的）。 */
     public static void logout(ServerPlayerEntity player) {
-        long now = System.currentTimeMillis();
-        // 彻底重置：清除所有关联信息、权限
-        STATES.put(player.getUuid(), new PlayerAuthState(false, now, now));
+        PlayerAuthState state = STATES.get(player.getUuid());
+        if (state != null) {
+            // 保留 linkedDisplayId/linkedUsername/linked 状态
+            // 只清除认证和 pending 状态
+            state.authenticated = false;
+            state.lastActivityMs = System.currentTimeMillis();
+            state.pendingDisplayId = null;
+            state.pendingUsername = null;
+            state.permission = null;
+        } else {
+            long now = System.currentTimeMillis();
+            STATES.put(player.getUuid(), new PlayerAuthState(false, now, now));
+        }
     }
 
     /** 玩家是否已认证。 */

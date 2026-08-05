@@ -3,6 +3,9 @@ package com.iqcl.auth.server;
 import com.iqcl.auth.IqclAuth;
 import com.iqcl.auth.config.ModConfig;
 import com.iqcl.auth.network.NetworkConstants;
+import com.iqcl.auth.password.LoginAttemptLimiter;
+import com.iqcl.auth.password.PasswordCommandHandler;
+import com.iqcl.auth.password.PasswordManager;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
@@ -24,10 +27,19 @@ import net.minecraft.util.Formatting;
  * 使用 Fabric {@link CommandRegistrationCallback} 注册以下指令：
  * <ul>
  *   <li>{@code /iqcl login pin <pin>} — 玩家 PIN 登录验证（所有玩家可用）</li>
- *   <li>{@code /iqcl status} — 查看自身认证状态（所有玩家可用）</li>
- *   <li>{@code /iqcl status <player>} — 查看指定玩家状态（需 OP 2 级）</li>
- *   <li>{@code /iqcl logout} — 登出自己（所有玩家可用）</li>
- *   <li>{@code /iqcl logout <player>} — 登出指定玩家（需 OP 2 级）</li>
+ *   <li>{@code /iqcl login password <密码>} — 密码登录（所有玩家可用，服务端降级路径）</li>
+ *   <li>{@code /iqcl register password <密码> <确认>} — 注册本服密码账号</li>
+ *   <li>{@code /iqcl changepassword <旧> <新>} — 修改密码（需已登录）</li>
+ *   <li>{@code /iqcl unregister password <密码>} — 注销密码账号（需已登录）</li>
+ *   <li>{@code /iqcl account} — 查看自身账号状态</li>
+ *   <li>{@code /iqcl cancel} — 取消 PIN 待关联状态</li>
+ *   <li>{@code /iqcl status [player]} — 查看认证状态</li>
+ *   <li>{@code /iqcl logout [player]} — 登出</li>
+ *   <li>{@code /iqcl force <player>} — 强行登录玩家（OP 2）</li>
+ *   <li>{@code /iqcl link} — 确认 IQCL 账号关联</li>
+ *   <li>{@code /iqcl admin unregister <player>} — 强制删除玩家密码账号（OP 2）</li>
+ *   <li>{@code /iqcl admin resetpassword <player>} — 重置玩家密码（OP 2）</li>
+ *   <li>{@code /iqcl admin reloadstorage} — 热重载存储后端（OP 2）</li>
  * </ul>
  * <p>
  * 权限规则：
@@ -58,7 +70,33 @@ public final class CommandRegistry {
                                 .then(CommandManager.literal("pin")
                                         .then(CommandManager.argument("pin",
                                                 StringArgumentType.string())
-                                                .executes(CommandRegistry::executeLoginPin))))
+                                                .executes(CommandRegistry::executeLoginPin)))
+                                .then(CommandManager.literal("password")
+                                        .then(CommandManager.argument("password",
+                                                StringArgumentType.greedyString())
+                                                .executes(PasswordCommandHandler::executeLoginPassword))))
+                        .then(CommandManager.literal("register")
+                                .then(CommandManager.literal("password")
+                                        .then(CommandManager.argument("password",
+                                                StringArgumentType.string())
+                                                .then(CommandManager.argument("confirm",
+                                                        StringArgumentType.string())
+                                                        .executes(PasswordCommandHandler::executeRegisterPassword)))))
+                        .then(CommandManager.literal("changepassword")
+                                .then(CommandManager.argument("old",
+                                        StringArgumentType.string())
+                                        .then(CommandManager.argument("new",
+                                                StringArgumentType.string())
+                                                .executes(PasswordCommandHandler::executeChangePassword))))
+                        .then(CommandManager.literal("unregister")
+                                .then(CommandManager.literal("password")
+                                        .then(CommandManager.argument("password",
+                                                StringArgumentType.string())
+                                                .executes(PasswordCommandHandler::executeUnregisterPassword))))
+                        .then(CommandManager.literal("account")
+                                .executes(PasswordCommandHandler::executeAccount))
+                        .then(CommandManager.literal("cancel")
+                                .executes(PasswordCommandHandler::executeCancel))
                         .then(CommandManager.literal("status")
                                 .executes(CommandRegistry::executeStatusSelf)
                                 .then(CommandManager.argument("player",
@@ -77,7 +115,19 @@ public final class CommandRegistry {
                                         EntityArgumentType.player())
                                         .executes(CommandRegistry::executeForce)))
                         .then(CommandManager.literal("link")
-                                .executes(CommandRegistry::executeLink)));
+                                .executes(CommandRegistry::executeLink))
+                        .then(CommandManager.literal("admin")
+                                .requires(source -> source.hasPermissionLevel(2))
+                                .then(CommandManager.literal("unregister")
+                                        .then(CommandManager.argument("player",
+                                                EntityArgumentType.player())
+                                                .executes(PasswordCommandHandler::executeAdminUnregister)))
+                                .then(CommandManager.literal("resetpassword")
+                                        .then(CommandManager.argument("player",
+                                                EntityArgumentType.player())
+                                                .executes(PasswordCommandHandler::executeAdminResetPassword)))
+                                .then(CommandManager.literal("reloadstorage")
+                                        .executes(PasswordCommandHandler::executeAdminReloadStorage))));
     }
 
     /**
@@ -125,16 +175,18 @@ public final class CommandRegistry {
     private static void showStatus(ServerCommandSource source,
                                    ServerPlayerEntity target, boolean isOther) {
         boolean authed = AuthState.isAuthenticated(target.getUuid());
+        boolean linked = AuthState.isLinked(target.getUuid());
+        boolean registered = PasswordManager.isRegisteredSync(target.getUuid());
         if (authed) {
             int timeout = ModConfig.get().sessionTimeoutSeconds;
             if (isOther) {
                 source.sendFeedback(() ->
                         Text.literal("[IQCL] ✅ " + target.getEntityName()
-                                + " 已通过 PIN 认证（session 超时 " + timeout + " 秒）")
+                                + " 已通过认证（session 超时 " + timeout + " 秒）")
                                 .formatted(Formatting.GREEN), false);
             } else {
                 source.sendFeedback(() ->
-                        Text.literal("[IQCL] ✅ 你已通过 PIN 认证（session 超时 " + timeout + " 秒）")
+                        Text.literal("[IQCL] ✅ 你已通过认证（session 超时 " + timeout + " 秒）")
                                 .formatted(Formatting.GREEN), false);
             }
         } else {
@@ -153,13 +205,28 @@ public final class CommandRegistry {
                         Text.literal("[IQCL] ❌ 你尚未登录！")
                                 .formatted(Formatting.RED, Formatting.BOLD), false);
                 source.sendFeedback(() ->
-                        Text.literal("  请输入: /iqcl login pin <你的PIN码>")
+                        Text.literal("  PIN 登录: /iqcl login pin <你的PIN码>")
                                 .formatted(Formatting.AQUA), false);
+                if (config.passwordLoginEnabled) {
+                    source.sendFeedback(() ->
+                            Text.literal("  密码登录: /iqcl login password <密码>")
+                                    .formatted(Formatting.AQUA), false);
+                    if (!registered) {
+                        source.sendFeedback(() ->
+                                Text.literal("  首次使用请先注册: /iqcl register password <密码> <确认密码>")
+                                        .formatted(Formatting.AQUA), false);
+                    }
+                }
                 source.sendFeedback(() ->
                         Text.literal("  宽限时间: " + graceSec + " 秒 | 登录超时: " + loginTimeout + " 秒")
                                 .formatted(Formatting.GRAY), false);
             }
         }
+        // 密码账号与 IQCL 关联状态
+        source.sendFeedback(() ->
+                Text.literal("  密码账号: " + (registered ? "已注册" : "未注册")
+                        + " | IQCL 关联: " + (linked ? "已关联" : "未关联"))
+                        .formatted(Formatting.GRAY), false);
     }
 
     // ========== logout ==========
@@ -185,13 +252,14 @@ public final class CommandRegistry {
         AuthState.logout(player);
         PlayerSessionManager.removeAccountBinding(player);
         PlayerSessionManager.removeSession(player.getUuid());
+        LoginAttemptLimiter.reset(player.getUuid());
 
         // 通知客户端重置本地认证状态
         PacketByteBuf buf = PacketByteBufs.create();
         ServerPlayNetworking.send(player, NetworkConstants.S2C_LOGOUT_ID, buf);
 
         player.sendMessage(
-                Text.literal("[IQCL] 已成功登出，请重新输入 /iqcl login pin <PIN码> 登录")
+                Text.literal("[IQCL] 已成功登出，请重新输入 /iqcl login pin <PIN码> 或 /iqcl login password <密码> 登录")
                         .formatted(Formatting.GREEN),
                 false);
         IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已登出", player.getEntityName());
@@ -214,6 +282,7 @@ public final class CommandRegistry {
         AuthState.logout(target);
         PlayerSessionManager.removeAccountBinding(target);
         PlayerSessionManager.removeSession(target.getUuid());
+        LoginAttemptLimiter.reset(target.getUuid());
 
         // 通知目标客户端重置本地认证状态
         PacketByteBuf buf = PacketByteBufs.create();
@@ -223,7 +292,7 @@ public final class CommandRegistry {
                 Text.literal("[IQCL] 已登出玩家 " + target.getEntityName())
                         .formatted(Formatting.GREEN), false);
         target.sendMessage(
-                Text.literal("[IQCL] 你已被管理员登出，请重新输入 /iqcl login pin <PIN码> 登录")
+                Text.literal("[IQCL] 你已被管理员登出，请重新输入 /iqcl login pin <PIN码> 或 /iqcl login password <密码> 登录")
                         .formatted(Formatting.RED),
                 false);
         IqclAuth.LOGGER.info("[IQCL Auth] 管理员 {} 登出玩家 {}",
@@ -285,7 +354,10 @@ public final class CommandRegistry {
         }
 
         AuthState.PlayerAuthState state = AuthState.getState(player.getUuid());
-        if (state == null || !AuthState.isAuthenticated(player.getUuid())) {
+        // 接受已认证或待关联状态的玩家执行 /link
+        if (state == null
+                || (!AuthState.isAuthenticated(player.getUuid())
+                    && !AuthState.hasPendingLink(player.getUuid()))) {
             player.sendMessage(
                     Text.literal("[IQCL] 请先通过 /iqcl login pin <PIN码> 登录后再关联")
                             .formatted(Formatting.RED),

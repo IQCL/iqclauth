@@ -89,10 +89,15 @@ public final class ServerNetworkHandler {
         try {
             IqclAuth.LOGGER.debug("[IQCL Auth] [{}] processVerify 开始处理", playerName);
 
-            // —— 服务端已认证检查：已登录玩家拒绝重复验证 ——
+            // —— 服务端已认证检查：已登录或待关联玩家拒绝重复验证 ——
             if (AuthState.isAuthenticated(player.getUuid())) {
                 IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 已认证，拒绝重复验证", playerName);
-                sendResult(server, player, false, "你已经登录成功，无需重复验证");
+                sendResult(server, player, true, "你已经登录成功，无需重复验证");
+                return;
+            }
+            if (AuthState.hasPendingLink(player.getUuid())) {
+                IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 待关联，拒绝重复验证", playerName);
+                sendResult(server, player, false, "你正在关联确认中，请输入 /iqcl link 完成关联");
                 return;
             }
 
@@ -229,6 +234,27 @@ public final class ServerNetworkHandler {
 
             // —— 强制账号关联检查 ——
             if (config.requireLink && (displayId != null || username != null)) {
+                // 检查玩家是否已关联
+                AuthState.PlayerAuthState existingState = AuthState.getState(player.getUuid());
+                boolean alreadyLinked = existingState != null && existingState.linked;
+
+                if (alreadyLinked && existingState.linkedDisplayId != null) {
+                    // 已关联：检查是否同一个 displayId
+                    if (existingState.linkedDisplayId.equals(displayId)) {
+                        // 同一个账号，直接完成登录
+                        IqclAuth.LOGGER.info("[IQCL Auth] [{}] 已关联账号匹配，直接登录", playerName);
+                        completeLogin(server, player, playerName, displayId, username);
+                        return;
+                    } else {
+                        // 不同账号，拒绝
+                        sendResult(server, player, false,
+                                "你已关联 IQCL 账号 (ID: " + existingState.linkedDisplayId
+                                        + ")，无法使用其他账号登录");
+                        return;
+                    }
+                }
+
+                // 未关联：进入关联确认流程
                 String displayLine = (displayId != null ? "ID: " + displayId : "");
                 String nameLine = (username != null ? "用户名: " + username : "");
                 String msg = "====================================\n"
@@ -318,15 +344,16 @@ public final class ServerNetworkHandler {
         });
     }
 
-    /** 通过服务端主线程向玩家发送纯文本消息。 */
+    /** 通过服务端主线程向玩家发送纯文本聊天消息（不影响客户端认证状态）。 */
     private static void sendRawMessage(MinecraftServer server, ServerPlayerEntity player,
                                        String message) {
         server.execute(() -> {
             if (player.networkHandler != null && !player.isRemoved()) {
-                PacketByteBuf buf = PacketByteBufs.create();
-                buf.writeBoolean(true);
-                buf.writeString(message);
-                ServerPlayNetworking.send(player, NetworkConstants.S2C_RESULT_ID, buf);
+                // 使用聊天消息而非 S2C_RESULT，避免误更新客户端 authenticated 状态
+                String[] lines = message.split("\n");
+                for (String line : lines) {
+                    player.sendMessage(net.minecraft.text.Text.literal(line), false);
+                }
             }
         });
     }

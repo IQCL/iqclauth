@@ -146,7 +146,7 @@ public final class PlayerRestrictionManager {
         // 快照物品和位置
         PlayerSessionManager.captureJoinSnapshot(player);
 
-        // 初始化认证状态
+        // 初始化认证状态（从磁盘加载关联信息）
         AuthState.onPlayerJoin(player);
 
         ModConfig config = ModConfig.get();
@@ -155,40 +155,47 @@ public final class PlayerRestrictionManager {
         if (config.persistentSession) {
             boolean autoLoggedIn = PlayerSessionManager.tryPersistentSession(player);
             if (autoLoggedIn) {
-                // 自动恢复成功：调度到主线程完成后续操作
-                player.getServer().execute(() -> {
-                    PlayerSessionManager.recordAuthenticatedIp(player);
-                    AuthState.authenticate(player);
-                    PlayerSessionManager.restoreFromLimbo(player);
+                // JOIN 事件已在主线程，直接同步执行，避免竞态
+                PlayerSessionManager.recordAuthenticatedIp(player);
+                AuthState.authenticate(player);
+                PlayerSessionManager.restoreFromLimbo(player);
 
-                    // 获取账号信息
-                    AuthState.PlayerAuthState st = AuthState.getState(player.getUuid());
-                    String username = player.getEntityName();
-                    if (st != null && st.linkedUsername != null) {
-                        username = st.linkedUsername;
-                    }
+                // 发送 game-session login
+                String username = player.getEntityName();
+                AuthState.PlayerAuthState st = AuthState.getState(player.getUuid());
+                if (st != null && st.linkedUsername != null) {
+                    username = st.linkedUsername;
+                }
+                ApiGateway.notifyLogin(player.getUuid().toString(), username);
 
-                    // 发送 game-session login
-                    ApiGateway.notifyLogin(player.getUuid().toString(), username);
+                // 通知客户端设置已登录状态
+                net.minecraft.network.PacketByteBuf buf =
+                        net.fabricmc.fabric.api.networking.v1.PacketByteBufs.create();
+                buf.writeBoolean(true);
+                buf.writeString("欢迎回来！已自动恢复登录状态");
+                net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(
+                        player,
+                        com.iqcl.auth.network.NetworkConstants.S2C_RESULT_ID,
+                        buf);
 
-                    // 通知客户端
-                    try {
-                        net.minecraft.network.PacketByteBuf buf =
-                                net.fabricmc.fabric.api.networking.v1.PacketByteBufs.create();
-                        buf.writeBoolean(true);
-                        buf.writeString("欢迎回来！已自动恢复登录状态");
-                        net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(
-                                player,
-                                com.iqcl.auth.network.NetworkConstants.S2C_RESULT_ID,
-                                buf);
-                    } catch (Exception ignored) {
-                    }
+                // 发送欢迎消息
+                player.sendMessage(
+                        Text.literal("[IQCL] ✅ 欢迎回来！已自动恢复登录状态")
+                                .formatted(Formatting.GREEN, Formatting.BOLD), false);
 
-                    IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 自动恢复登录成功",
-                            player.getEntityName());
-                });
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 自动恢复登录成功",
+                        player.getEntityName());
                 return;
             }
+        }
+
+        // —— 已关联账号的检查：如果玩家已关联过，提示用绑定的 PIN 登录 ——
+        AuthState.PlayerAuthState state = AuthState.getState(player.getUuid());
+        if (state != null && state.linked) {
+            player.sendMessage(
+                    Text.literal("[IQCL] 你已关联 IQCL 账号 (ID: " + state.linkedDisplayId + ")，" +
+                            "请使用该账号的 PIN 码登录")
+                            .formatted(Formatting.YELLOW), false);
         }
 
         // —— 送入 Limbo 隔离区（仅未命中持久会话的玩家）——
@@ -212,11 +219,19 @@ public final class PlayerRestrictionManager {
                 Text.literal("")
                         .formatted(Formatting.RESET), false);
         player.sendMessage(
-                Text.literal("  你需要输入 PIN 码进行身份验证：")
+                Text.literal("  你需要登录才能游玩，可选方式：")
                         .formatted(Formatting.WHITE), false);
         player.sendMessage(
-                Text.literal("  /iqcl login pin <你的PIN码>")
+                Text.literal("  PIN 登录: /iqcl login pin <你的PIN码>")
                         .formatted(Formatting.AQUA, Formatting.BOLD), false);
+        if (config.passwordLoginEnabled) {
+            player.sendMessage(
+                    Text.literal("  密码登录: /iqcl login password <密码>")
+                            .formatted(Formatting.AQUA, Formatting.BOLD), false);
+            player.sendMessage(
+                    Text.literal("  首次使用密码登录请先注册: /iqcl register password <密码> <确认密码>")
+                            .formatted(Formatting.AQUA), false);
+        }
         player.sendMessage(
                 Text.literal("")
                         .formatted(Formatting.RESET), false);
@@ -251,7 +266,7 @@ public final class PlayerRestrictionManager {
         }
     }
 
-    /** 每 tick：超时检查 + Limbo 坠落保护 + 逐项限制。 */
+    /** 每 tick：超时检查 + Limbo 坠落保护 + 传送后坠落保护 + 逐项限制。 */
     private static void onServerTick(MinecraftServer server) {
         ModConfig config = ModConfig.get();
         int sessionTimeout = config.sessionTimeoutSeconds;
@@ -270,6 +285,9 @@ public final class PlayerRestrictionManager {
             if (!authed && config.limboEnabled) {
                 PlayerSessionManager.tickLimboProtection(player, config);
             }
+
+            // —— 传送后坠落保护：所有玩家（含已认证）——
+            PlayerSessionManager.tickFallProtection(player);
 
             // —— 未认证 + 宽限已过 → 执行逐项 tick 限制 ——
             if (!authed && !AuthState.isInGracePeriod(player.getUuid(), config.gracePeriodSeconds)) {
@@ -327,10 +345,18 @@ public final class PlayerRestrictionManager {
 
     /** 发送登录提示 + 剩余时间。 */
     private static void sendLoginPrompt(ServerPlayerEntity player) {
-        player.sendMessage(
-                Text.literal("[IQCL] 你尚未登录！请输入: /iqcl login pin <你的PIN码>")
-                        .formatted(Formatting.RED, Formatting.BOLD),
-                false);
+        ModConfig config = ModConfig.get();
+        if (config.passwordLoginEnabled) {
+            player.sendMessage(
+                    Text.literal("[IQCL] 你尚未登录！请输入: /iqcl login pin <PIN码> 或 /iqcl login password <密码>")
+                            .formatted(Formatting.RED, Formatting.BOLD),
+                    false);
+        } else {
+            player.sendMessage(
+                    Text.literal("[IQCL] 你尚未登录！请输入: /iqcl login pin <你的PIN码>")
+                            .formatted(Formatting.RED, Formatting.BOLD),
+                    false);
+        }
         long remaining = getRemainingSeconds(player);
         if (remaining > 0) {
             player.sendMessage(
@@ -360,8 +386,12 @@ public final class PlayerRestrictionManager {
     /** 通知玩家操作被阻止。 */
     private static void notifyBlocked(PlayerEntity player, String action) {
         if (player.age % 80 == 0 && player instanceof ServerPlayerEntity sp) {
+            ModConfig config = ModConfig.get();
+            String cmd = config.passwordLoginEnabled
+                    ? "/iqcl login pin <PIN> 或 /iqcl login password <密码>"
+                    : "/iqcl login pin <PIN>";
             sp.sendMessage(
-                    Text.literal("[IQCL] 你尚未登录，无法" + action + "。请输入 /iqcl login pin <PIN>")
+                    Text.literal("[IQCL] 你尚未登录，无法" + action + "。请输入 " + cmd)
                             .formatted(Formatting.RED),
                     false);
         }

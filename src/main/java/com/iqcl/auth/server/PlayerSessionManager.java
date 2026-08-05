@@ -41,6 +41,12 @@ public final class PlayerSessionManager {
     /** 已送入 Limbo 的玩家 UUID 集合（用于每 tick 持续保护）。 */
     private static final Set<UUID> LIMBO_PLAYERS = ConcurrentHashMap.newKeySet();
 
+    /** 传送后坠落保护：UUID → 保护到期时间（毫秒）。 */
+    private static final Map<UUID, Long> FALL_PROTECTION = new ConcurrentHashMap<>();
+
+    /** 持续坠落保护默认时长（毫秒）——传送后 3 秒内免疫坠落伤害。 */
+    private static final long FALL_PROTECTION_MS = 3000L;
+
     /** 持久会话数据（IP + 过期时间）。 */
     private static class SessionData {
         final String ip;
@@ -56,6 +62,7 @@ public final class PlayerSessionManager {
 
     /**
      * 记录玩家进服时的物品和位置快照。
+     * 如果玩家上次在 Limbo 断线（playerdata 保存了 Limbo 位置），用出生点替代。
      */
     public static void captureJoinSnapshot(ServerPlayerEntity player) {
         PlayerSnapshot snapshot = new PlayerSnapshot();
@@ -69,6 +76,31 @@ public final class PlayerSessionManager {
             snapshot.items.add(inv.getStack(i).copy());
         }
         snapshot.heldItemIndex = inv.selectedSlot;
+
+        // —— 检测当前位置是否是 Limbo 位置（上次在 Limbo 断线）——
+        ModConfig config = ModConfig.get();
+        if (config.limboEnabled) {
+            Vec3d limboCenter = new Vec3d(
+                    config.limboX + 0.5, config.limboY, config.limboZ + 0.5);
+            double distSq = snapshot.pos.squaredDistanceTo(limboCenter);
+            boolean inLimboDim = snapshot.worldId.equals(config.limboDimension);
+
+            // 距离 Limbo 中心 < 25 格（约 5 格半径）且在 Limbo 维度 → 视为 Limbo 位置
+            if (distSq < 25.0 && inLimboDim) {
+                IqclAuth.LOGGER.info("[IQCL Auth] 检测到玩家 {} 的 playerdata 位置在 Limbo，使用出生点替代",
+                        player.getEntityName());
+                // 用世界出生点替代
+                ServerWorld world = player.getServerWorld();
+                BlockPos spawnPos = world.getSpawnPos();
+                snapshot.pos = new Vec3d(
+                        spawnPos.getX() + 0.5,
+                        spawnPos.getY(),
+                        spawnPos.getZ() + 0.5);
+                snapshot.yaw = world.getSpawnAngle();
+                snapshot.pitch = 0f;
+            }
+        }
+
         JOIN_SNAPSHOTS.put(player.getUuid(), snapshot);
     }
 
@@ -163,7 +195,6 @@ public final class PlayerSessionManager {
     public static void restoreFromLimbo(ServerPlayerEntity player) {
         ModConfig config = ModConfig.get();
         if (!config.restoreOnLogin) {
-            // 即使不恢复，也要清除 Limbo 标记和重力
             LIMBO_PLAYERS.remove(player.getUuid());
             player.setNoGravity(false);
             return;
@@ -171,8 +202,19 @@ public final class PlayerSessionManager {
 
         PlayerSnapshot snapshot = JOIN_SNAPSHOTS.get(player.getUuid());
         if (snapshot == null) {
+            // 没有快照：传送到世界出生点
             LIMBO_PLAYERS.remove(player.getUuid());
             player.setNoGravity(false);
+            player.fallDistance = 0f;
+            player.setVelocity(Vec3d.ZERO);
+            ServerWorld world = player.getServerWorld();
+            BlockPos spawnPos = world.getSpawnPos();
+            player.networkHandler.requestTeleport(
+                    spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5,
+                    world.getSpawnAngle(), 0f);
+            FALL_PROTECTION.put(player.getUuid(), System.currentTimeMillis() + FALL_PROTECTION_MS);
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 无快照，传送到世界出生点",
+                    player.getEntityName());
             return;
         }
 
@@ -181,14 +223,41 @@ public final class PlayerSessionManager {
         player.fallDistance = 0f;
         player.setVelocity(Vec3d.ZERO);
 
-        // —— 传送回原位置前确保无坠落速度 ——
+        // —— 检查目标位置下方是否有方块，确保安全 ——
+        ServerWorld world = player.getServerWorld();
+        int blockX = (int) Math.floor(snapshot.pos.x);
+        int blockY = (int) Math.floor(snapshot.pos.y);
+        int blockZ = (int) Math.floor(snapshot.pos.z);
+        BlockPos targetPos = new BlockPos(blockX, blockY - 1, blockZ);
+        boolean hasGround = world.getBlockState(targetPos).isSolidBlock(world, targetPos);
+
+        double teleportX = snapshot.pos.x;
+        double teleportY = snapshot.pos.y;
+        double teleportZ = snapshot.pos.z;
+
+        if (!hasGround) {
+            // 下方没有方块，找最近的安全位置
+            // 往上找 10 格内的第一个有地面的位置
+            for (int dy = 1; dy <= 10; dy++) {
+                BlockPos groundPos = new BlockPos(blockX, blockY + dy - 1, blockZ);
+                if (world.getBlockState(groundPos).isSolidBlock(world, groundPos)) {
+                    teleportY = snapshot.pos.y + dy;
+                    break;
+                }
+            }
+        }
+
+        // —— 传送回原位置（或安全位置）——
         player.networkHandler.requestTeleport(
-                snapshot.pos.x, snapshot.pos.y, snapshot.pos.z,
+                teleportX, teleportY, teleportZ,
                 snapshot.yaw, snapshot.pitch);
 
         // 二次清除（防止传送过程中产生的坠落）
         player.setVelocity(Vec3d.ZERO);
         player.fallDistance = 0f;
+
+        // —— 标记 3 秒坠落保护 ——
+        FALL_PROTECTION.put(player.getUuid(), System.currentTimeMillis() + FALL_PROTECTION_MS);
 
         // 恢复物品
         PlayerInventory inv = player.getInventory();
@@ -202,6 +271,25 @@ public final class PlayerSessionManager {
     }
 
     /**
+     * 每 tick 检查坠落保护：如果玩家在保护期内，重置 fallDistance。
+     * 由 PlayerRestrictionManager.onServerTick 调用。
+     */
+    public static void tickFallProtection(ServerPlayerEntity player) {
+        Long expireAt = FALL_PROTECTION.get(player.getUuid());
+        if (expireAt == null) return;
+
+        long now = System.currentTimeMillis();
+        if (now >= expireAt) {
+            FALL_PROTECTION.remove(player.getUuid());
+            return;
+        }
+
+        // 保护期内：强制清零坠落距离和速度
+        player.fallDistance = 0f;
+        player.setVelocity(Vec3d.ZERO);
+    }
+
+    /**
      * 检查持久会话是否有效（同 IP 且未过期）。
      * 纯检查方法，不修改任何状态。
      * @return true = 可以自动恢复，false = 需要重新登录
@@ -212,11 +300,15 @@ public final class PlayerSessionManager {
 
         UUID uuid = player.getUuid();
         SessionData session = PERSISTENT_SESSIONS.get(uuid);
-        if (session == null) return false;
+        if (session == null) {
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 无持久会话记录", player.getEntityName());
+            return false;
+        }
 
         // 检查是否过期
         long now = System.currentTimeMillis();
         if (now > session.expireAtMs) {
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 持久会话已过期", player.getEntityName());
             PERSISTENT_SESSIONS.remove(uuid);
             return false;
         }
@@ -224,11 +316,19 @@ public final class PlayerSessionManager {
         // 检查 IP 是否匹配
         if (config.trustIp) {
             String playerIp = getPlayerIp(player);
-            if (playerIp == null || !playerIp.equals(session.ip)) {
+            if (playerIp == null) {
+                IqclAuth.LOGGER.warn("[IQCL Auth] 玩家 {} IP 获取失败，无法匹配持久会话",
+                        player.getEntityName());
+                return false;
+            }
+            if (!playerIp.equals(session.ip)) {
+                IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} IP 不匹配 ({} != {})，需重新登录",
+                        player.getEntityName(), playerIp, session.ip);
                 return false;
             }
         }
 
+        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 持久会话命中，自动恢复登录", player.getEntityName());
         return true;
     }
 
@@ -241,6 +341,11 @@ public final class PlayerSessionManager {
         if (ip != null) {
             long expireAt = System.currentTimeMillis() + (long) config.sessionMaxAgeSeconds * 1000L;
             PERSISTENT_SESSIONS.put(player.getUuid(), new SessionData(ip, expireAt));
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 持久会话已记录 (IP={}, 过期={}秒后)",
+                    player.getEntityName(), ip, config.sessionMaxAgeSeconds);
+        } else {
+            IqclAuth.LOGGER.warn("[IQCL Auth] 玩家 {} IP 获取失败，持久会话未记录",
+                    player.getEntityName());
         }
     }
 
@@ -300,26 +405,18 @@ public final class PlayerSessionManager {
     }
 
     /**
-     * 获取玩家 IP 地址（Fabric 1.20.1 兼容方式）。
+     * 获取玩家 IP 地址。
+     * 使用 ServerPlayNetworkHandler.getConnectionAddress() 公开方法（Loom 自动重映射），
+     * 避免反射使用 Yarn 映射名（生产环境会失败）。
      */
     private static String getPlayerIp(ServerPlayerEntity player) {
         try {
-            // ServerPlayNetworkHandler 直接继承 Object，connection 字段就在此类上
-            java.lang.reflect.Field f = net.minecraft.server.network.ServerPlayNetworkHandler.class
-                    .getDeclaredField("connection");
-            f.setAccessible(true);
-            Object conn = f.get(player.networkHandler);
-            if (conn != null) {
-                Object channel = conn.getClass().getMethod("channel").invoke(conn);
-                if (channel instanceof io.netty.channel.Channel ch) {
-                    java.net.SocketAddress addr = ch.remoteAddress();
-                    if (addr instanceof java.net.InetSocketAddress inet) {
-                        return inet.getHostString();
-                    }
-                }
+            java.net.SocketAddress addr = player.networkHandler.getConnectionAddress();
+            if (addr instanceof java.net.InetSocketAddress inet) {
+                return inet.getHostString();
             }
         } catch (Exception e) {
-            IqclAuth.LOGGER.debug("[IQCL Auth] 获取玩家 IP 失败: {}", e.getMessage());
+            IqclAuth.LOGGER.warn("[IQCL Auth] 获取玩家 IP 失败: {}", e.getMessage());
         }
         return null;
     }

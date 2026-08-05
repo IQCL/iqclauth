@@ -183,6 +183,104 @@ public class ModConfig {
      */
     public boolean enableGameSessionApi = true;
 
+    // ========== 密码登录（借鉴 EasyAuth 思路，自主实现） ==========
+
+    /**
+     * 是否启用密码登录功能。
+     * true: /iqcl login password / register / changepassword / unregister 等子命令可用
+     * false: 拒绝执行所有密码相关命令
+     */
+    public boolean passwordLoginEnabled = true;
+
+    /**
+     * 密码登录成功后是否提示玩家关联 IQCL 账号（不强制）。
+     * true: 未关联 IQCL 的玩家密码登录成功后发送提示消息
+     * false: 不提示
+     */
+    public boolean promptIqclLinkAfterPasswordLogin = true;
+
+    /** 密码策略配置。 */
+    public PasswordPolicyConfig passwordPolicy = new PasswordPolicyConfig();
+
+    /** 密码哈希参数配置。 */
+    public PasswordHashConfig passwordHash = new PasswordHashConfig();
+
+    /** 登录爆破防护配置。 */
+    public LoginAttemptConfig loginAttempt = new LoginAttemptConfig();
+
+    /** 密码存储后端配置。 */
+    public PasswordStorageConfig passwordStorage = new PasswordStorageConfig();
+
+    /** 密码策略配置。 */
+    public static class PasswordPolicyConfig {
+        /** 密码最小长度。 */
+        public int minPasswordLength = 8;
+        /** 密码最大长度。 */
+        public int maxPasswordLength = 64;
+        /** 必须包含字母。 */
+        public boolean requireLetter = true;
+        /** 必须包含数字。 */
+        public boolean requireDigit = true;
+        /** 必须包含特殊字符。 */
+        public boolean requireSpecialChar = false;
+        /** 是否允许空格。 */
+        public boolean allowSpace = false;
+        /** 弱密码检查级别：0=关闭，1=基础黑名单。 */
+        public int weakPasswordCheckLevel = 1;
+    }
+
+    /** 密码哈希参数配置。 */
+    public static class PasswordHashConfig {
+        /** PBKDF2 迭代次数（建议 ≥ 100000）。 */
+        public int iterations = 100000;
+        /** 盐长度（字节，建议 16）。 */
+        public int saltBytes = 16;
+        /** 输出哈希位数（固定 256，对应 PBKDF2WithHmacSHA256）。 */
+        public int hashBits = 256;
+    }
+
+    /** 登录爆破防护配置。 */
+    public static class LoginAttemptConfig {
+        /** 最大失败尝试次数。 */
+        public int maxLoginAttempts = 5;
+        /** 锁定时长（秒）。 */
+        public int lockSeconds = 300;
+        /** 是否启用指数退避（每次连续锁定时长翻倍）。 */
+        public boolean exponentialBackoff = true;
+        /** 单次锁定上限（秒）。 */
+        public int maxLockSeconds = 3600;
+    }
+
+    /** 密码存储后端配置。 */
+    public static class PasswordStorageConfig {
+        /** 存储后端类型：sqlite | mysql | postgres | mongo。 */
+        public String backend = "sqlite";
+        /** SQLite 数据库文件路径。 */
+        public String sqliteFile = "config/iqclauth/passwords.db";
+
+        // —— MySQL ——
+        public String mysqlHost = "localhost";
+        public int mysqlPort = 3306;
+        public String mysqlDatabase = "iqclauth";
+        public String mysqlUser = "iqclauth";
+        public String mysqlPassword = "";
+        public String mysqlTablePrefix = "iqclauth_";
+        public boolean mysqlUseSsl = true;
+
+        // —— PostgreSQL ——
+        public String postgresHost = "localhost";
+        public int postgresPort = 5432;
+        public String postgresDatabase = "iqclauth";
+        public String postgresSchema = "public";
+        public String postgresUser = "iqclauth";
+        public String postgresPassword = "";
+
+        // —— MongoDB ——
+        public String mongoUri = "mongodb://localhost:27017";
+        public String mongoDatabase = "iqclauth";
+        public String mongoCollection = "accounts";
+    }
+
     private static volatile ModConfig instance;
 
     /** 获取配置单例，首次调用时自动加载。 */

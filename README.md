@@ -1,14 +1,17 @@
 # IQCL Auth — Fabric 1.20.1 双端认证模组
 
-基于 Fabric Loader 的双端（客户端 + 服务端）PIN 认证模组。
-客户端使用 **RSA-OAEP-2048/SHA-256** 加密 PIN，服务端作为不可信透明转发节点将密文 POST 至远程验证服务器，并对验证服务器返回的 **Ed25519** 签名执行规范化 JSON 验签。
+基于 Fabric Loader 的双端（客户端 + 服务端）认证模组，提供两种登录方式：
+
+1. **PIN 登录**（远程验证）：客户端使用 **RSA-OAEP-2048/SHA-256** 加密 PIN，服务端作为不可信透明转发节点将密文 POST 至远程验证服务器，并对验证服务器返回的 **Ed25519** 签名执行规范化 JSON 验签。
+2. **密码登录**（本地验证，借鉴 EasyAuth 思路自主实现）：服务端本地存储密码哈希（**PBKDF2WithHmacSHA256**，100k 迭代 + 16 字节随机盐），支持多存储后端（SQLite 默认，阶段 3 将扩展 MySQL/PostgreSQL/MongoDB）。密码登录与 PIN 登录互通——任一方式登录后即解锁所有限制。
 
 ## ⚠️ 重要安全声明
 
 1. 模组内置固定 RSA 公钥、Ed25519 公钥，仅适配 IQCL 官方验证服务；
 2. 技术上任何人可修改源码替换内置公钥，搭建仿冒验证服务。开源协议仅约束代码版权，无法阻止此类篡改；
 3. 客户端未安装本模组时，`/iqcl login pin` 指令会明文发送 PIN，存在严重安全风险；
-4. 模组仅提供通信加密方案，整体安全根基依赖远程验证服务器。
+4. 密码登录在阶段 1 走服务端命令降级路径（明文经 MC 加密通道传输，服务端不记录日志）；阶段 2 将增加客户端 ECDH+AES-GCM 加密通道；
+5. 模组仅提供通信加密方案，整体安全根基依赖远程验证服务器（PIN）与本地 PBKDF2 哈希（密码）。
 
 ## 安全模型
 
@@ -131,12 +134,34 @@ gradlew.bat build
 | ----------- | ------------------------------- |
 | `serverKey` | 服务端身份密钥，作为 `X-Server-Key` 请求头发送 |
 
+密码登录相关配置（首次启动自动生成于同一 `config/iqclauth.json`）：
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `passwordLoginEnabled` | `true` | 是否启用密码登录功能 |
+| `promptIqclLinkAfterPasswordLogin` | `true` | 密码登录成功后是否提示关联 IQCL 账号 |
+| `passwordPolicy.minPasswordLength` | `8` | 密码最小长度 |
+| `passwordPolicy.maxPasswordLength` | `64` | 密码最大长度 |
+| `passwordPolicy.requireLetter` | `true` | 必须包含字母 |
+| `passwordPolicy.requireDigit` | `true` | 必须包含数字 |
+| `passwordPolicy.requireSpecialChar` | `false` | 必须包含特殊字符 |
+| `passwordPolicy.allowSpace` | `false` | 是否允许空格 |
+| `passwordPolicy.weakPasswordCheckLevel` | `1` | 弱密码检查级别（0=关，1=基础黑名单） |
+| `passwordHash.iterations` | `100000` | PBKDF2 迭代次数 |
+| `passwordHash.saltBytes` | `16` | 盐长度（字节） |
+| `loginAttempt.maxLoginAttempts` | `5` | 最大失败尝试次数 |
+| `loginAttempt.lockSeconds` | `300` | 锁定时长（秒） |
+| `loginAttempt.exponentialBackoff` | `true` | 指数退避（每次锁定翻倍） |
+| `loginAttempt.maxLockSeconds` | `3600` | 单次锁定上限（秒） |
+| `passwordStorage.backend` | `"sqlite"` | 存储后端（阶段1仅 sqlite，阶段3扩展 mysql/postgres/mongo） |
+| `passwordStorage.sqliteFile` | `"config/iqclauth/passwords.db"` | SQLite 数据库文件路径 |
+
 > 验证服务器 API 地址已硬编码为 `https://www.iqcl.de5.net/api/verify-pin`（代码常量，不可修改）。
 > 配置仅服务端读取。客户端不需要配置（RSA 公钥与 Ed25519 公钥已硬编码于代码中）。
 
 ### 3. 使用
 
-在游戏内聊天框输入：
+#### PIN 登录（远程 IQCL 账号验证）
 
 ```
 /iqcl login pin ABCD-EFGH-JKLM
@@ -149,6 +174,42 @@ gradlew.bat build
 3. 服务端转发至验证服务器
 4. 服务端验签后将结果回传客户端
 5. 聊天框显示 `[IQCL] PIN 验证成功，登录已放行` 或失败信息
+
+#### 密码登录（本服本地验证，借鉴 EasyAuth 思路）
+
+```
+# 首次使用：注册密码账号（与游戏 UUID 绑定）
+/iqcl register password <密码> <确认密码>
+
+# 登录
+/iqcl login password <密码>
+
+# 修改密码（需已登录）
+/iqcl changepassword <旧密码> <新密码>
+
+# 注销密码账号（需已登录，需确认密码）
+/iqcl unregister password <密码>
+
+# 查看自身账号状态（密码账号 / IQCL 关联 / 当前认证）
+/iqcl account
+
+# 取消 PIN 待关联状态
+/iqcl cancel
+```
+
+管理员命令（需 OP 2 级）：
+
+```
+/iqcl admin unregister <玩家>        # 强制删除玩家密码账号
+/iqcl admin resetpassword <玩家>     # 重置玩家密码为临时随机串（输出给管理员）
+/iqcl admin reloadstorage            # 热重载存储后端配置（阶段3）
+```
+
+密码登录与 PIN 登录互通：
+- 任一方式登录后即解锁所有限制，并触发持久会话（同 IP 重连自动恢复）
+- 密码登录成功后若未关联 IQCL 账号，会提示执行 `/iqcl login pin` 关联（不强制）
+- 已关联 IQCL 账号的玩家也可用密码登录，登录后用关联的用户名通知 game-session API
+- 爆破防护：5 次失败后锁定 5 分钟（指数退避，封顶 1 小时）
 
 ## 验证服务器接口约定
 
@@ -216,8 +277,9 @@ MC 服务端使用硬编码 Ed25519 公钥验签，验签失败直接拒绝登�
 | Minecraft     | 1.20.1           | —                  |
 | Fabric Loader | ≥0.15.11         | 模组加载器              |
 | Fabric API    | 0.92.2+1.20.1    | 事件、网络 API          |
-| BouncyCastle  | 1.78.1 (jdk18on) | RSA-OAEP + Ed25519 |
-| Java          | ≥17              | —                  |
+| SQLite JDBC   | 3.46.1.3         | 密码登录默认存储后端（嵌套 JAR） |
+| HikariCP      | 5.1.0            | JDBC 连接池（嵌套 JAR）   |
+| Java          | ≥17              | PBKDF2/RSA-OAEP/Ed25519 均由 JDK 内置 |
 
 ## 开源协议
 

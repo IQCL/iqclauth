@@ -35,6 +35,14 @@ dependencies {
     modImplementation "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:2.2.22+1802ada577"
     modImplementation "net.fabricmc.fabric-api:fabric-events-interaction-v0:0.6.2+1802ada577"
     modImplementation "net.fabricmc.fabric-api:fabric-networking-api-v1:1.0.0+1802ada577"
+
+    // —— 密码登录：存储后端依赖 ——
+    // SQLite 驱动（默认存储后端，必需）
+    implementation "org.xerial:sqlite-jdbc:3.46.1.3"
+    include "org.xerial:sqlite-jdbc:3.46.1.3"
+    // HikariCP 连接池（JDBC 连接管理）
+    implementation "com.zaxxer:HikariCP:5.1.0"
+    include "com.zaxxer:HikariCP:5.1.0"
 }
 
 processResources {

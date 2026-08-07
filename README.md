@@ -64,7 +64,7 @@ MC 客户端(模组)   → 聊天框展示成功/失败
   ④ 通过 s2c_result 回传结果
 ```
 
-密码登录与 PIN 登录互通：任一方式登录后即解锁所有限制，并触发持久会话；密码登录成功后若未关联 IQCL 账号，会提示执行 `/iqcl login pin` 关联（不强制）。
+密码登录与 PIN 登录互通：任一方式登录后即解锁所有限制，并触发持久会话；密码登录成功后会提示执行 `/iqcl link` 通过 PIN 登录绑定 IQCL 账号（不强制）。绑定逻辑由 IQCL 后端接管，本地不存储 UUID↔displayId 关系。
 
 ## 功能矩阵
 
@@ -72,11 +72,11 @@ MC 客户端(模组)   → 聊天框展示成功/失败
 | --- | --- | --- |
 | **登录** | PIN 远程验证 | 强制双端模组 |
 |  | 密码本地登录（注册 / 登录 / 改密 / 注销） | `passwordLoginEnabled=true` |
-| **2FA** | TOTP（RFC 6238，兼容 Google Authenticator） | 30 秒步长、6 位、含重放防护 |
+| **2FA** | TOTP（RFC 6238，兼容 Google Authenticator） | 30 秒步长、6 位、含重放防护；`totpEnabled=true` 总开关 |
 | **会话** | 持久会话自动登录（同 IP 重连） | `persistentSession=true`，`sessionMaxAgeSeconds=28800`（8h） |
 |  | 异地登录检测（IP 绑定） | `enableIpBinding=true` |
 |  | 单账号唯一在线（防多开，异地登录踢旧连接） | `singleAccountOnline=true` |
-|  | Session 超时踢出 | `sessionTimeoutSeconds=1800` |
+|  | Session 保留时限（仅离线生效，在线玩家永不因 session 超时被踢） | `sessionTimeoutSeconds=1800` |
 | **隔离** | Limbo 隔离区（清空背包 + 传送至天空平台） | `limboEnabled=true`，默认 (0, 200, 0) |
 |  | 登录后恢复物品 / 位置 / 朝向 | `restoreOnLogin=true` |
 |  | 坐标保护（登录时快照防离线篡改） | 内置实现 |
@@ -90,6 +90,7 @@ MC 客户端(模组)   → 聊天框展示成功/失败
 | **集成** | game-session API（登录 / 登出通知 `www.iqcl.de5.net`） | `enableGameSessionApi=true` |
 |  | LuckPerms 上下文（认证状态注入权限上下文） | 自动探测，未安装则跳过 |
 |  | 多语言（zh_cn / en_us） | 跟随客户端语言 |
+| **状态一致性** | 客户端/服务端认证状态同步 | 仅"登录成功"结果置位客户端状态；登出由 `s2c_logout` 通道统一重置；（重）进服自动清零本地状态 |
 | **管理** | `/iqcl force` 强行登录、`/iqcl admin *` 管理、`/iqcl status/logout` | OP 2 级权限 |
 | **环境检测** | 自动识别 CLIENT/SERVER 环境，单人/联机模式跳过服务端限制 | 基于 `EnvType` 检测 |
 
@@ -152,9 +153,8 @@ iqclauth/
         │       └── StorageExecutor.java         # 异步线程池
         └── server/
             ├── ApiGateway.java          # 远程 API 调用封装（含 X-Server-Key 头）
-            ├── AuthState.java           # 玩家认证 / 关联状态机
+            ├── AuthState.java           # 玩家认证状态机
             ├── CommandRegistry.java     # /iqcl 全部指令注册
-            ├── LinkStore.java           # UUID ↔ IQCL displayId 持久化
             ├── PlayerRestrictionManager.java # 行为限制（事件 + 包级双层）
             ├── PlayerSessionManager.java # Limbo / 持久会话 / 防多开 / 坐标快照
             ├── ServerNetworkHandler.java # PIN 密文转发 + Ed25519 验签
@@ -256,11 +256,12 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 | 基础 | `serverKey` | `REPLACE_WITH_YOUR_X_SERVER_KEY` | 服务端身份密钥 |
 |  | `gracePeriodSeconds` | `15` | 进服宽限期（秒）。`-1`=关闭，`0`=立即限制 |
 |  | `loginTimeoutSeconds` | `300` | 未登录超时踢出（秒）。`0`=不限制 |
-|  | `sessionTimeoutSeconds` | `1800` | 已认证 session 超时（秒）。`0`=永不超时 |
-| 账号关联 | `requireLink` | `true` | PIN 验证成功后是否强制 `/iqcl link` 确认关联 |
+|  | `sessionTimeoutSeconds` | `1800` | 会话保留时限（秒），仅对离线玩家生效：在线玩家绝不因 session 超时被踢；退出游戏后开始计时，时限内重连自动恢复登录，超过后需重新输入凭证。`0`=不限制 |
+| 账号关联 | `requireLink` | 已移除 | 绑定逻辑已由 IQCL 后端接管，本地不再存储 UUID↔displayId 关系 |
 | Limbo 隔离区 | `limboEnabled` | `true` | 启用 Limbo（false 则原地冻结） |
 |  | `limboDimension` | `minecraft:overworld` | 隔离区维度 |
 |  | `limboX` / `limboY` / `limboZ` | `0` / `200` / `0` | 隔离区坐标（Y 建议 ≥200） |
+|  | `limboGeneratePlatform` | `true` | 是否在隔离区下方生成 5×5 石头+玻璃垫脚平台（关闭适用于已有现成平台的隔离区） |
 |  | `restoreOnLogin` | `true` | 登录后恢复物品 / 位置 / 朝向 |
 |  | `clearInventoryOnJoin` | `true` | 进服立即清空背包 |
 | 持久会话 | `persistentSession` | `true` | 同 IP 重连自动登录 |
@@ -281,6 +282,7 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 | Game Session | `enableGameSessionApi` | `true` | 玩家登录 / 登出时通知 `www.iqcl.de5.net` |
 | 密码登录 | `passwordLoginEnabled` | `true` | 启用密码登录子命令 |
 |  | `promptIqclLinkAfterPasswordLogin` | `true` | 密码登录成功后提示关联 IQCL 账号 |
+|  | `totpEnabled` | `true` | TOTP 总开关。`false` 时所有 TOTP 命令拒绝执行，密码登录跳过 TOTP 步骤（即使账号已配置 TOTP） |
 | 密码策略 | `passwordPolicy.minPasswordLength` | `8` | 密码最小长度 |
 |  | `passwordPolicy.maxPasswordLength` | `64` | 密码最大长度 |
 |  | `passwordPolicy.requireLetter` | `true` | 必须包含字母 |
@@ -303,6 +305,32 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 
 ### 3. 使用
 
+#### 3.0 命令速查表
+
+| 命令 | 说明 | 权限 |
+| --- | --- | --- |
+| `/iqcl login pin <PIN码>` | PIN 登录（客户端 RSA 加密，远程 IQCL 验证），成功后自动绑定 IQCL 账号 | 所有玩家 |
+| `/iqcl login password <密码>` | 密码登录（本服本地验证，ECDH+AES-GCM 加密通道） | 所有玩家 |
+| `/iqcl login confirmtotp <验证码>` | 密码登录后的 TOTP 二次验证确认 | 所有玩家 |
+| `/iqcl register password <密码> <确认密码>` | 注册本服密码账号（与游戏 UUID 绑定） | 所有玩家 |
+| `/iqcl changepassword <旧密码> <新密码>` | 修改密码 | 需已登录 |
+| `/iqcl unregister password <密码>` | 注销密码账号 | 需已登录 |
+| `/iqcl enablerotp` | 开启 TOTP 双因素认证（输出二维码/secret） | 需已登录，`totpEnabled=true` |
+| `/iqcl confirmtotp <验证码>` | 确认开启 TOTP | 需已登录 |
+| `/iqcl disablerotp <密码>` | 关闭 TOTP（需密码确认） | 需已登录 |
+| `/iqcl account` | 查看自身账号状态（认证 / 密码账号 / TOTP） | 所有玩家 |
+| `/iqcl link` | 绑定 IQCL 账号引导（详见 [3.2](#32-密码登录本服本地验证) 与关键行为规则） | 所有玩家 |
+| `/iqcl status` | 查看自己的认证状态 | 所有玩家 |
+| `/iqcl status <player>` | 查看指定玩家认证状态 | OP 2 |
+| `/iqcl logout` | 主动登出（送回 Limbo，下次登录回到登出前位置） | 所有玩家 |
+| `/iqcl logout <player>` | 管理员登出指定玩家 | OP 2 |
+| `/iqcl force <player>` | 绕过验证强行登录玩家 | OP 2 |
+| `/iqcl admin unregister <player>` | 强制删除玩家密码账号 | OP 2 |
+| `/iqcl admin resetpassword <player>` | 重置玩家密码为临时随机串 | OP 2 |
+| `/iqcl admin reloadstorage` | 热重载存储后端配置 | OP 2 |
+
+> PIN / 密码 / TOTP 相关凭证均由客户端拦截器加密后通过自定义数据包发送，明文不会进入服务端日志或命令记录。
+
 #### 3.1 PIN 登录（远程 IQCL 账号验证）
 
 ```
@@ -316,7 +344,7 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 3. 服务端转发至 `https://www.iqcl.de5.net/api/verify-pin`；
 4. 服务端对响应执行 Ed25519 验签后回传客户端；
 5. 聊天框显示 `[IQCL] PIN 验证成功，登录已放行` 或失败信息；
-6. 若 `requireLink=true`，需执行 `/iqcl link` 确认账号关联后才能最终登录。
+6. PIN 登录成功后若返回 displayId，自动显示绑定信息（可在 IQCL 安全中心查看或解绑）。
 
 #### 3.2 密码登录（本服本地验证）
 
@@ -333,11 +361,14 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 # 注销密码账号（需已登录，需确认密码）
 /iqcl unregister password <密码>
 
-# 查看自身账号状态（密码账号 / IQCL 关联 / 当前认证 / TOTP）
+# 查看自身账号状态（密码账号 / 当前认证 / TOTP）
 /iqcl account
 
-# 取消 PIN 待关联状态
-/iqcl cancel
+# 绑定 IQCL 账号：
+#   未登录 → 提示用 PIN 登录
+#   已 PIN 登录 → 展示当前绑定信息，不登出
+#   已密码/TOTP 登录 → 自动登出并送回隔离区，要求 PIN 重新登录绑定
+/iqcl link
 ```
 
 #### 3.3 TOTP 二次验证（RFC 6238，兼容 Google Authenticator）
@@ -353,7 +384,7 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 /iqcl disablerotp <密码>
 ```
 
-启用后，密码登录成功不会立即放行，会要求输入 `/iqcl login confirmtotp <code>`；PIN 登录若关联账号开启了 TOTP 也会触发。
+启用后，密码登录成功不会立即放行，会要求输入 `/iqcl login confirmtotp <code>`；PIN 登录若关联账号开启了 TOTP 也会触发。将 `totpEnabled` 设为 `false` 可全局关闭 TOTP：所有 TOTP 命令拒绝执行，密码登录直接放行。
 
 #### 3.4 会话与登出
 
@@ -391,12 +422,19 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
   ```
   尝试 `/iqcl login` 等命令时会提示"当前处于单人/联机模式，IQCL Auth 登录需在安装了本模组的专用服务器上使用"。
 - **进服流程**：玩家加入 → 进服清空背包（若启用） → 传送至 Limbo 隔离区 → 宽限期内可自由活动 → 超过宽限期触发全部限制 → 登录超时未登录则踢出。
+- **在线玩家永不因 session 超时被踢**：已认证玩家在线期间始终视为活动中（每 tick 刷新活动时间），无论是否在移动都不会被 session 超时踢出；`sessionTimeoutSeconds` 仅在玩家退出游戏后开始计时：时限内重连可自动恢复登录，超过后持久会话失效，需重新输入凭证。
 - **登录恢复**：登录成功后，从快照恢复物品、坐标、朝向（不会丢失钻石装备，也不会被传送到出生点）。
-- **登出流程**：先快照当前位置 / 物品 → 通知客户端重置 → 传送回 Limbo。下次登录会回到登出前位置。
+- **登出流程**：先快照当前位置 / 物品 → 通知客户端重置 → 传送回 Limbo。下次登录会回到登出前位置。登出后未登录超时与宽限期从登出时刻重新起算，不会被立即踢出。
+- **登录状态一致性**：客户端本地认证状态仅由真正的"登录成功"结果置位（PIN 放行 / 密码登录成功 / 持久会话自动恢复 / 管理员强行登录）；注册、改密、重复登录拒绝等结果只展示不改变状态；登出统一由 `s2c_logout` 通道重置双端状态；玩家（重）进服时客户端自动清零本地状态，避免残留旧状态导致误拦登录。
 - **防多开**：同一 IQCL 账号 / 同一 UUID 在新设备登录时，旧连接被踢下线。
 - **game-session 通知**：登录调用 `POST /api/game-session/login`，登出 / 断线调用 `POST /api/game-session/logout`，请求头携带 `X-Server-Key`，请求体包含 `mcUUID` 与可选 `username`。
 - **爆破防护**：5 次失败后锁定 5 分钟，指数退避封顶 1 小时。
-- **重复登录拦截**：登录成功后再次执行登录命令在客户端与服务端双层拦截。
+- **重复登录拦截**：登录成功后再次执行登录命令在客户端与服务端双层拦截；拒绝结果以失败状态回传，不会被客户端误判为登录成功。
+- **IQCL 账号绑定**：绑定逻辑由 IQCL 后端接管，本地不存储 UUID↔displayId 关系。PIN 登录成功后自动展示绑定信息，可在 [IQCL 安全中心](https://www.iqcl.de5.net/auth/user/) 查看或解绑。若后端返回 UUID 绑定冲突（MC UUID 已绑定其他用户），模组会显示友好提示。
+- **`/iqcl link`**：引导玩家通过 PIN 登录绑定 IQCL 账号，按当前登录方式分三种行为：
+  - 未登录 → 提示使用 `/iqcl login pin` 登录；
+  - 已通过 PIN 登录（会话内有 displayId）→ 展示当前绑定信息，不登出；
+  - 已通过密码/TOTP 登录 → 真正执行登出（清除服务端认证状态 + 防多开绑定清理 + 通知客户端重置 + 送回隔离区），并明确提示用 PIN 重新登录完成绑定。
 
 ## 验证服务器接口约定
 

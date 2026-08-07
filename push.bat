@@ -1,4 +1,4 @@
 chcp 65001
 git add .
-git commit -m "完成了totp服务，并修复了在单人游戏也要登录"
+git commit -m "修复了登录后30分钟自动踢人的bug"
 git push origin main

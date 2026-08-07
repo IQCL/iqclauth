@@ -182,7 +182,6 @@ public final class PasswordCommandHandler {
         }
 
         boolean authed = AuthState.isAuthenticated(player.getUuid());
-        boolean linked = AuthState.isLinked(player.getUuid());
         boolean registered = PasswordManager.isRegisteredSync(player.getUuid());
         boolean totpEnabled = PasswordManager.isTotpEnabledSync(player.getUuid());
 
@@ -206,13 +205,6 @@ public final class PasswordCommandHandler {
                                 ? Text.literal("已注册").formatted(Formatting.GREEN)
                                 : Text.literal("未注册").formatted(Formatting.YELLOW)),
                 false);
-        player.sendMessage(
-                Text.literal("  IQCL 关联: ")
-                        .formatted(Formatting.WHITE)
-                        .append(linked
-                                ? Text.literal("已关联").formatted(Formatting.GREEN)
-                                : Text.literal("未关联").formatted(Formatting.YELLOW)),
-                false);
         if (registered) {
             player.sendMessage(
                     Text.literal("  TOTP 双因素: ")
@@ -228,35 +220,11 @@ public final class PasswordCommandHandler {
             }
         }
         player.sendMessage(
+                Text.literal("  IQCL 绑定: 执行 /iqcl link 通过 PIN 登录绑定")
+                        .formatted(Formatting.GRAY), false);
+        player.sendMessage(
                 Text.literal("====================================")
                         .formatted(Formatting.GOLD), false);
-        return 1;
-    }
-
-    // ========== cancel ==========
-
-    /** {@code /iqcl cancel} — 取消 PIN 待关联状态。 */
-    public static int executeCancel(CommandContext<ServerCommandSource> context) {
-        ServerPlayerEntity player = context.getSource().getPlayer();
-        if (player == null) {
-            context.getSource().sendError(Text.literal("此命令只能由玩家执行")
-                    .formatted(Formatting.RED));
-            return 0;
-        }
-
-        if (!AuthState.hasPendingLink(player.getUuid())) {
-            player.sendMessage(
-                    Text.literal("[IQCL] 你当前没有待取消的关联状态")
-                            .formatted(Formatting.YELLOW),
-                    false);
-            return 0;
-        }
-
-        AuthState.cancelPendingLink(player.getUuid());
-        player.sendMessage(
-                Text.literal("[IQCL] 已取消 IQCL 账号关联确认")
-                        .formatted(Formatting.GREEN),
-                false);
         return 1;
     }
 

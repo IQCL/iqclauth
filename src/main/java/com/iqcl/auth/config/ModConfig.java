@@ -61,20 +61,13 @@ public class ModConfig {
     public int loginTimeoutSeconds = 300;
 
     /**
-     * 已认证玩家的 session 超时时间（秒）。
-     * 超过此时间无活动将被踢出。
-     * 0 = 永不超时。
+     * 会话保留时限（秒），仅对离线玩家生效。
+     * 已认证玩家在线期间始终视为活动中，绝不会因 session 超时被踢；
+     * 退出游戏后从此时刻开始计时，时限内重连可自动恢复登录，
+     * 超过后持久会话失效，需重新输入凭证。
+     * 0 = 不限制（离线会话沿用 sessionMaxAgeSeconds 过期时间）。
      */
     public int sessionTimeoutSeconds = 1800;
-
-    // ========== 账号关联 ==========
-
-    /**
-     * 是否强制账号关联。
-     * true: PIN 验证成功后必须输入 /iqcl link 确认关联才能登录
-     * false: PIN 验证成功后直接登录（不强制关联）
-     */
-    public boolean requireLink = true;
 
     // ========== Limbo 隔离区 ==========
 
@@ -96,6 +89,13 @@ public class ModConfig {
 
     /** Limbo 隔离区坐标（Z）。 */
     public int limboZ = 0;
+
+    /**
+     * 是否在 Limbo 隔离区下方生成垫脚方块平台（5×5 石头 + 中心玻璃）。
+     * true: 生成安全平台防止玩家跌落虚空
+     * false: 不生成平台（适用于已有现成平台的隔离区）
+     */
+    public boolean limboGeneratePlatform = true;
 
     /**
      * 登录成功后是否恢复玩家物品和位置。
@@ -205,6 +205,13 @@ public class ModConfig {
      * false: 不提示
      */
     public boolean promptIqclLinkAfterPasswordLogin = true;
+
+    /**
+     * 是否启用 TOTP 双因素认证。
+     * true: 密码登录成功后若账号配置了 TOTP 会触发二次验证
+     * false: 完全跳过 TOTP（即使账号配置了 TOTP 也直接放行）
+     */
+    public boolean totpEnabled = true;
 
     /** 密码策略配置。 */
     public PasswordPolicyConfig passwordPolicy = new PasswordPolicyConfig();

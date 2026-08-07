@@ -20,6 +20,10 @@ base {
 
 repositories {
     maven { url "https://mirrors.zju.edu.cn/maven/" }
+    maven {
+        name = "FabricMirror"
+        url = "https://mirrors.cloud.tencent.com/nexus/repository/maven-public/"
+    }
     mavenCentral()
 }
 

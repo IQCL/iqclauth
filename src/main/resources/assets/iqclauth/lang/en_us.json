@@ -7,6 +7,10 @@
   "iqclauth.auth.blocked": "You are not logged in, cannot perform this action",
   "iqclauth.auth.kick": "Login timed out, please re-enter PIN",
   "iqclauth.auth.pin_invalid": "Invalid PIN format, expected ABCD-EFGH-JKLM (12 uppercase alphanumeric chars with hyphens)",
+  "iqclauth.auth.uuid_binding_conflict": "This game account is already bound to another IQCL account. Please check or unbind in IQCL Security Center",
+  "iqclauth.auth.link_prompt_pin": "Please login with PIN to bind your IQCL account",
+  "iqclauth.auth.link_logged_out": "Logged out. Please login with PIN to bind your IQCL account",
+  "iqclauth.auth.link_security_center": "You can check or unbind in IQCL Security Center",
 
   "iqclauth.password.error.null": "Password must not be empty",
   "iqclauth.password.error.too_short": "Password is too short",

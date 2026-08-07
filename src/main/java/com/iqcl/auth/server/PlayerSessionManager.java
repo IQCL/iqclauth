@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 IQCL
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 package com.iqcl.auth.server;
 
 import com.iqcl.auth.IqclAuth;
@@ -136,18 +143,20 @@ public final class PlayerSessionManager {
 
         // —— 在 Limbo 生成安全平台（3x3 石头+玻璃地板）——
         // 防止玩家跌落虚空，让玩家有地方站立
-        BlockPos centerPos = new BlockPos(bx, by, bz);
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                BlockPos floorPos = centerPos.add(dx, -1, dz);
-                if (world.getBlockState(floorPos).isAir()) {
-                    world.setBlockState(floorPos, Blocks.STONE.getDefaultState());
+        if (config.limboGeneratePlatform) {
+            BlockPos centerPos = new BlockPos(bx, by, bz);
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    BlockPos floorPos = centerPos.add(dx, -1, dz);
+                    if (world.getBlockState(floorPos).isAir()) {
+                        world.setBlockState(floorPos, Blocks.STONE.getDefaultState());
+                    }
                 }
             }
+            // 中心位置用玻璃标记
+            BlockPos glassPos = centerPos.add(0, -1, 0);
+            world.setBlockState(glassPos, Blocks.GLASS.getDefaultState());
         }
-        // 中心位置用玻璃标记
-        BlockPos glassPos = centerPos.add(0, -1, 0);
-        world.setBlockState(glassPos, Blocks.GLASS.getDefaultState());
 
         // —— 强制传送至 Limbo 中心 ——
         player.networkHandler.requestTeleport(
@@ -378,6 +387,30 @@ public final class PlayerSessionManager {
         AUTHENTICATED_IPS.remove(uuid);
     }
 
+    /**
+     * 玩家退出游戏后开始计算会话保留时限。
+     * <p>
+     * 将持久会话过期时间收紧为"退出时刻 + sessionTimeoutSeconds"：
+     * 在线期间玩家始终视为活动中（不踢），退出后在此时限内重连仍可自动恢复登录，
+     * 超过后持久会话失效，需重新输入凭证。sessionTimeoutSeconds &lt;= 0 表示不收紧，
+     * 仍沿用登录时写入的 sessionMaxAgeSeconds 过期时间。
+     */
+    public static void applyDisconnectSessionTimeout(UUID uuid) {
+        ModConfig config = ModConfig.get();
+        int timeoutSeconds = config.sessionTimeoutSeconds;
+        if (timeoutSeconds <= 0) return;
+
+        SessionData session = PERSISTENT_SESSIONS.get(uuid);
+        if (session == null) return;
+
+        long newExpireAt = System.currentTimeMillis() + timeoutSeconds * 1000L;
+        if (newExpireAt < session.expireAtMs) {
+            PERSISTENT_SESSIONS.put(uuid, new SessionData(session.ip, newExpireAt));
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 退出游戏，会话保留 {} 秒（至过期）",
+                    uuid, timeoutSeconds);
+        }
+    }
+
     // ========== 异地登录检测 ==========
 
     /** 默认异地登录锁定时长（毫秒）—— 5 分钟。 */
@@ -518,8 +551,9 @@ public final class PlayerSessionManager {
         sendToLimboInternal(player, clearInventory);
 
         // —— 3) 标记未登录状态 ——
-        AuthState.logout(player);
+        // 注意顺序：先清防多开绑定（依赖 currentDisplayId），再清除认证状态
         removeAccountBinding(player);
+        AuthState.logout(player);
         // 保留持久会话供重连自动恢复
     }
 
@@ -536,17 +570,19 @@ public final class PlayerSessionManager {
         int bz = config.limboZ;
 
         // 安全平台
-        BlockPos centerPos = new BlockPos(bx, by, bz);
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                BlockPos floorPos = centerPos.add(dx, -1, dz);
-                if (world.getBlockState(floorPos).isAir()) {
-                    world.setBlockState(floorPos, Blocks.STONE.getDefaultState());
+        if (config.limboGeneratePlatform) {
+            BlockPos centerPos = new BlockPos(bx, by, bz);
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    BlockPos floorPos = centerPos.add(dx, -1, dz);
+                    if (world.getBlockState(floorPos).isAir()) {
+                        world.setBlockState(floorPos, Blocks.STONE.getDefaultState());
+                    }
                 }
             }
+            BlockPos glassPos = centerPos.add(0, -1, 0);
+            world.setBlockState(glassPos, Blocks.GLASS.getDefaultState());
         }
-        BlockPos glassPos = centerPos.add(0, -1, 0);
-        world.setBlockState(glassPos, Blocks.GLASS.getDefaultState());
 
         player.networkHandler.requestTeleport(bx + 0.5, by, bz + 0.5, 0f, 0f);
         player.setVelocity(Vec3d.ZERO);
@@ -568,8 +604,8 @@ public final class PlayerSessionManager {
      */
     public static void removeAccountBinding(ServerPlayerEntity player) {
         AuthState.PlayerAuthState state = AuthState.getState(player.getUuid());
-        if (state != null && state.linkedDisplayId != null) {
-            DISPLAYID_TO_PLAYER.remove(state.linkedDisplayId);
+        if (state != null && state.currentDisplayId != null) {
+            DISPLAYID_TO_PLAYER.remove(state.currentDisplayId);
         }
         // 保留持久会话（AUTHENTICATED_IPS），只清除账号绑定
     }
@@ -583,8 +619,8 @@ public final class PlayerSessionManager {
         LIMBO_PLAYERS.remove(uuid);
         // 注意：不清除 PERSISTENT_SESSIONS，让持久会话在过期前可用于自动恢复
         AuthState.PlayerAuthState state = AuthState.getState(uuid);
-        if (state != null && state.linkedDisplayId != null) {
-            DISPLAYID_TO_PLAYER.remove(state.linkedDisplayId);
+        if (state != null && state.currentDisplayId != null) {
+            DISPLAYID_TO_PLAYER.remove(state.currentDisplayId);
         }
     }
 

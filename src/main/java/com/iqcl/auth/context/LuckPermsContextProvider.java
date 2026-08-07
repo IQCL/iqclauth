@@ -116,7 +116,7 @@ public final class LuckPermsContextProvider {
         try {
             java.util.UUID uuid = player.getUuid();
             boolean authed = AuthState.isAuthenticated(uuid);
-            boolean linked = AuthState.isLinked(uuid);
+            boolean linked = AuthState.getCurrentDisplayId(uuid) != null;
             boolean sessionLocked = PlayerSessionManager.isSessionLocked(uuid);
 
             // ImmutableContext.of(key, value)
@@ -150,7 +150,7 @@ public final class LuckPermsContextProvider {
         Map<String, String> contexts = new HashMap<>();
         java.util.UUID uuid = player.getUuid();
         boolean authed = AuthState.isAuthenticated(uuid);
-        boolean linked = AuthState.isLinked(uuid);
+        boolean linked = AuthState.getCurrentDisplayId(uuid) != null;
         boolean sessionLocked = PlayerSessionManager.isSessionLocked(uuid);
 
         contexts.put("iqcl_authenticated", String.valueOf(authed));

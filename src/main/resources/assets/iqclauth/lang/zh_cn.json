@@ -7,6 +7,10 @@
   "iqclauth.auth.blocked": "你尚未登录，无法执行此操作",
   "iqclauth.auth.kick": "登录超时，请重新输入 PIN",
   "iqclauth.auth.pin_invalid": "PIN 格式无效，应为 ABCD-EFGH-JKLM 格式（12 位大写字母数字+连字符）",
+  "iqclauth.auth.uuid_binding_conflict": "此游戏账号已绑定其他 IQCL 账号，请前往 IQCL 安全中心查看或解绑",
+  "iqclauth.auth.link_prompt_pin": "请使用 PIN 码登录以绑定 IQCL 账号",
+  "iqclauth.auth.link_logged_out": "已登出当前账号。请使用 PIN 码登录以绑定 IQCL 账号",
+  "iqclauth.auth.link_security_center": "可在 IQCL 安全中心查看或解绑",
 
   "iqclauth.password.error.null": "密码不能为空",
   "iqclauth.password.error.too_short": "密码长度不足",

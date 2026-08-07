@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 IQCL
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 package com.iqcl.auth.server;
 
 import com.iqcl.auth.IqclAuth;
@@ -32,7 +39,6 @@ import net.minecraft.util.Formatting;
  *   <li>{@code /iqcl changepassword <旧> <新>} — 修改密码（需已登录）</li>
  *   <li>{@code /iqcl unregister password <密码>} — 注销密码账号（需已登录）</li>
  *   <li>{@code /iqcl account} — 查看自身账号状态</li>
- *   <li>{@code /iqcl cancel} — 取消 PIN 待关联状态</li>
  *   <li>{@code /iqcl status [player]} — 查看认证状态</li>
  *   <li>{@code /iqcl logout [player]} — 登出</li>
  *   <li>{@code /iqcl force <player>} — 强行登录玩家（OP 2）</li>
@@ -99,8 +105,6 @@ public final class CommandRegistry {
                                                 .executes(PasswordCommandHandler::executeUnregisterPassword))))
                         .then(CommandManager.literal("account")
                                 .executes(PasswordCommandHandler::executeAccount))
-                        .then(CommandManager.literal("cancel")
-                                .executes(PasswordCommandHandler::executeCancel))
                         .then(CommandManager.literal("status")
                                 .executes(CommandRegistry::executeStatusSelf)
                                 .then(CommandManager.argument("player",
@@ -189,18 +193,17 @@ public final class CommandRegistry {
     private static void showStatus(ServerCommandSource source,
                                    ServerPlayerEntity target, boolean isOther) {
         boolean authed = AuthState.isAuthenticated(target.getUuid());
-        boolean linked = AuthState.isLinked(target.getUuid());
         boolean registered = PasswordManager.isRegisteredSync(target.getUuid());
         if (authed) {
             int timeout = ModConfig.get().sessionTimeoutSeconds;
             if (isOther) {
                 source.sendFeedback(() ->
                         Text.literal("[IQCL] ✅ " + target.getEntityName()
-                                + " 已通过认证（session 超时 " + timeout + " 秒）")
+                                + " 已通过认证（离线会话保留 " + timeout + " 秒）")
                                 .formatted(Formatting.GREEN), false);
             } else {
                 source.sendFeedback(() ->
-                        Text.literal("[IQCL] ✅ 你已通过认证（session 超时 " + timeout + " 秒）")
+                        Text.literal("[IQCL] ✅ 你已通过认证（在线不受 session 超时限制，离线会话保留 " + timeout + " 秒）")
                                 .formatted(Formatting.GREEN), false);
             }
         } else {
@@ -236,11 +239,10 @@ public final class CommandRegistry {
                                 .formatted(Formatting.GRAY), false);
             }
         }
-        // 密码账号与 IQCL 关联状态
+        // 密码账号状态
         boolean totpEnabled = PasswordManager.isTotpEnabledSync(target.getUuid());
         source.sendFeedback(() ->
                 Text.literal("  密码账号: " + (registered ? "已注册" : "未注册")
-                        + " | IQCL 关联: " + (linked ? "已关联" : "未关联")
                         + (registered ? " | TOTP: " + (totpEnabled ? "已启用" : "未启用") : ""))
                         .formatted(Formatting.GRAY), false);
     }
@@ -359,7 +361,16 @@ public final class CommandRegistry {
     // ========== link ==========
 
     /**
-     * {@code /iqcl link} — 玩家确认将游戏账号与 IQCL 账号关联。
+     * {@code /iqcl link} — 引导玩家通过 PIN 登录绑定 IQCL 账号。
+     * <p>
+     * 分三种情况：
+     * <ol>
+     *   <li>未登录 → 直接提示使用 PIN 登录；</li>
+     *   <li>已通过 PIN 登录（会话内有 displayId）→ 展示当前绑定信息，不登出；</li>
+     *   <li>已通过密码/TOTP 登录 → <b>真正执行登出</b>（清服务端认证状态 +
+     *       通知客户端重置 + 送回 Limbo），并明确提示玩家用 PIN 重新登录。</li>
+     * </ol>
+     * 绑定逻辑已由 IQCL 后端接管，本地不再存储 UUID↔displayId 关系。
      */
     private static int executeLink(CommandContext<ServerCommandSource> context) {
         ServerCommandSource source = context.getSource();
@@ -369,65 +380,63 @@ public final class CommandRegistry {
             return 0;
         }
 
-        AuthState.PlayerAuthState state = AuthState.getState(player.getUuid());
-        // 接受已认证或待关联状态的玩家执行 /link
-        if (state == null
-                || (!AuthState.isAuthenticated(player.getUuid())
-                    && !AuthState.hasPendingLink(player.getUuid()))) {
+        // 已通过 PIN 登录（会话内有 displayId）—— 已绑定，展示信息即可，不登出
+        Integer displayId = AuthState.getCurrentDisplayId(player.getUuid());
+        if (AuthState.isAuthenticated(player.getUuid()) && displayId != null) {
+            String username = AuthState.getCurrentUsername(player.getUuid());
             player.sendMessage(
-                    Text.literal("[IQCL] 请先通过 /iqcl login pin <PIN码> 登录后再关联")
-                            .formatted(Formatting.RED),
-                    false);
-            return 0;
+                    Text.literal("[IQCL] 你当前已通过 PIN 登录并绑定 IQCL 账号：")
+                            .formatted(Formatting.GREEN), false);
+            player.sendMessage(
+                    Text.literal("  显示 ID: " + displayId
+                            + (username != null ? " | 用户名: " + username : ""))
+                            .formatted(Formatting.WHITE), false);
+            player.sendMessage(
+                    Text.literal("  可在 IQCL 安全中心查看或解绑")
+                            .formatted(Formatting.GRAY), false);
+            return 1;
         }
 
-        if (AuthState.isLinked(player.getUuid())) {
+        if (AuthState.isAuthenticated(player.getUuid())) {
+            // 已登录（密码/TOTP 登录）—— 真正登出：清服务端状态 + 通知客户端 + 送回 Limbo
+            LoginAttemptLimiter.reset(player.getUuid());
+
+            // 通知客户端重置本地认证状态（客户端会提示"已登出，请重新登录"）
+            PacketByteBuf buf = PacketByteBufs.create();
+            ServerPlayNetworking.send(player, NetworkConstants.S2C_LOGOUT_ID, buf);
+
+            // 清理会话记录
+            PlayerSessionManager.removeSession(player.getUuid());
+            // 登出并送回 Limbo（内部完成 AuthState.logout 与账号绑定清理）
+            PlayerSessionManager.logoutToLimbo(player, ModConfig.get().clearInventoryOnJoin);
+
             player.sendMessage(
-                    Text.literal("[IQCL] 你已经关联过 IQCL 账号，无需重复关联")
-                            .formatted(Formatting.YELLOW),
-                    false);
-            return 0;
-        }
-
-        if (state.pendingDisplayId == null && state.pendingUsername == null) {
+                    Text.literal("[IQCL] 你当前是密码/TOTP 登录，绑定 IQCL 账号需要用 PIN 重新登录。")
+                            .formatted(Formatting.YELLOW), false);
             player.sendMessage(
-                    Text.literal("[IQCL] 当前没有待关联的 IQCL 账号信息，请先完成 PIN 登录")
-                            .formatted(Formatting.RED),
-                    false);
-            return 0;
+                    Text.literal("  已为你登出并送回隔离区，请输入：")
+                            .formatted(Formatting.YELLOW), false);
+            player.sendMessage(
+                    Text.literal("  /iqcl login pin <你的PIN码>")
+                            .formatted(Formatting.AQUA, Formatting.BOLD), false);
+            player.sendMessage(
+                    Text.literal("  PIN 登录成功后将自动绑定，可在 IQCL 安全中心查看或解绑")
+                            .formatted(Formatting.GRAY), false);
+
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 通过 /iqcl link 登出，等待 PIN 登录绑定",
+                    player.getEntityName());
+        } else {
+            // 未登录 —— 直接提示 PIN 登录
+            player.sendMessage(
+                    Text.literal("[IQCL] 请使用 PIN 码登录以绑定 IQCL 账号：")
+                            .formatted(Formatting.YELLOW), false);
+            player.sendMessage(
+                    Text.literal("  /iqcl login pin <你的PIN码>")
+                            .formatted(Formatting.AQUA, Formatting.BOLD), false);
+            player.sendMessage(
+                    Text.literal("  PIN 登录成功后将自动绑定，可在 IQCL 安全中心查看或解绑")
+                            .formatted(Formatting.GRAY), false);
         }
-
-        // 确认关联
-        AuthState.confirmLink(player.getUuid());
-
-        String idLine = state.linkedDisplayId != null
-                ? "ID: " + state.linkedDisplayId : "";
-        String nameLine = state.linkedUsername != null
-                ? "用户名: " + state.linkedUsername : "";
-
-        // 完成登录流程
-        ServerNetworkHandler.completeLogin(
-                player.getServer(), player, player.getEntityName(),
-                state.linkedDisplayId, state.linkedUsername);
-
-        player.sendMessage(
-                Text.literal("====================================")
-                        .formatted(Formatting.GOLD), false);
-        player.sendMessage(
-                Text.literal("[IQCL] ✅ 账号关联成功！")
-                        .formatted(Formatting.GREEN, Formatting.BOLD), false);
-        player.sendMessage(
-                Text.literal("  " + idLine)
-                        .formatted(Formatting.WHITE), false);
-        player.sendMessage(
-                Text.literal("  " + nameLine)
-                        .formatted(Formatting.WHITE), false);
-        player.sendMessage(
-                Text.literal("====================================")
-                        .formatted(Formatting.GOLD), false);
-
-        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已关联 IQCL 账号 (displayId={}, username={})",
-                player.getEntityName(), state.linkedDisplayId, state.linkedUsername);
         return 1;
     }
 }

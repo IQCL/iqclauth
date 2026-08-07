@@ -11,9 +11,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.iqcl.auth.IqclAuth;
+import com.iqcl.auth.crypto.CanonicalJson;
 import com.iqcl.auth.config.ModConfig;
 import com.iqcl.auth.crypto.Base64Utils;
-import com.iqcl.auth.crypto.CanonicalJson;
+import com.iqcl.auth.password.PasswordManager;
 import com.iqcl.auth.crypto.Ed25519Verifier;
 import com.iqcl.auth.network.NetworkConstants;
 import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
@@ -89,15 +90,11 @@ public final class ServerNetworkHandler {
         try {
             IqclAuth.LOGGER.debug("[IQCL Auth] [{}] processVerify 开始处理", playerName);
 
-            // —— 服务端已认证检查：已登录或待关联玩家拒绝重复验证 ——
+            // —— 服务端已认证检查：已登录玩家拒绝重复验证 ——
+            // 注意：用 success=false 回传（本次并未执行登录），避免客户端把拒绝消息误判为登录成功
             if (AuthState.isAuthenticated(player.getUuid())) {
                 IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 已认证，拒绝重复验证", playerName);
-                sendResult(server, player, true, "你已经登录成功，无需重复验证");
-                return;
-            }
-            if (AuthState.hasPendingLink(player.getUuid())) {
-                IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 待关联，拒绝重复验证", playerName);
-                sendResult(server, player, false, "你正在关联确认中，请输入 /iqcl link 完成关联");
+                sendResult(server, player, false, "你已登录，无需重复验证");
                 return;
             }
 
@@ -149,11 +146,12 @@ public final class ServerNetworkHandler {
 
             boolean serverSuccess = resp.get("success").getAsBoolean();
 
-            // 失败响应：直接转发错误消息
+            // 失败响应：识别 UUID 绑定冲突等特定错误并给出友好提示
             if (!serverSuccess) {
                 String errMsg = resp.has("message") ? resp.get("message").getAsString() : "PIN 验证失败";
                 IqclAuth.LOGGER.info("[IQCL Auth] [{}] 验证失败: {}", playerName, errMsg);
-                sendResult(server, player, false, errMsg);
+                String friendlyMsg = resolveFriendlyErrorMessage(errMsg);
+                sendResult(server, player, false, friendlyMsg);
                 return;
             }
 
@@ -232,53 +230,7 @@ public final class ServerNetworkHandler {
             IqclAuth.LOGGER.info("[IQCL Auth] [{}] PIN 验证通过，displayId={}, username={}",
                     playerName, displayId, username);
 
-            // —— 强制账号关联检查 ——
-            if (config.requireLink && (displayId != null || username != null)) {
-                // 检查玩家是否已关联
-                AuthState.PlayerAuthState existingState = AuthState.getState(player.getUuid());
-                boolean alreadyLinked = existingState != null && existingState.linked;
-
-                if (alreadyLinked && existingState.linkedDisplayId != null) {
-                    // 已关联：检查是否同一个 displayId
-                    if (existingState.linkedDisplayId.equals(displayId)) {
-                        // 同一个账号，直接完成登录
-                        IqclAuth.LOGGER.info("[IQCL Auth] [{}] 已关联账号匹配，直接登录", playerName);
-                        completeLogin(server, player, playerName, displayId, username);
-                        return;
-                    } else {
-                        // 不同账号，拒绝
-                        sendResult(server, player, false,
-                                "你已关联 IQCL 账号 (ID: " + existingState.linkedDisplayId
-                                        + ")，无法使用其他账号登录");
-                        return;
-                    }
-                }
-
-                // 未关联：进入关联确认流程
-                String displayLine = (displayId != null ? "ID: " + displayId : "");
-                String nameLine = (username != null ? "用户名: " + username : "");
-                String msg = "====================================\n"
-                        + "[IQCL] 检测到 IQCL 账号信息：\n"
-                        + "  " + displayLine + "\n"
-                        + "  " + nameLine + "\n"
-                        + "\n"
-                        + "确定要将此游戏账号与 IQCL 账号关联吗？\n"
-                        + "输入 /iqcl link 确认关联\n"
-                        + "================================";
-                final Integer finalDisplayId = displayId;
-                final String finalUsername = username;
-                final String finalPermission = permission;
-                // 调度到主线程：先记录认证状态（未关联，待 link），再发送提示
-                server.execute(() -> {
-                    AuthState.authenticateWithAccount(player, finalDisplayId, finalUsername, finalPermission);
-                    sendRawMessage(server, player, msg);
-                    sendResult(server, player, false, "请输入 /iqcl link 确认关联后完成登录");
-                });
-                IqclAuth.LOGGER.info("[IQCL Auth] [{}] 等待 /iqcl link 确认关联", playerName);
-                return;
-            }
-
-            // —— 强制关联关闭或无账号信息，调度到主线程完成登录 ——
+            // —— 直接完成登录（绑定逻辑已由后端接管，本地不再存储 UUID↔displayId 关系）——
             completeLogin(server, player, playerName, displayId, username);
 
         } catch (java.net.SocketTimeoutException ste) {
@@ -323,6 +275,8 @@ public final class ServerNetworkHandler {
 
             // 标记认证
             AuthState.authenticate(player);
+            AuthState.setCurrentAccount(player, displayId, username, null);
+            AuthState.setLoginMethod(player.getUuid(), "pin");
             PlayerSessionManager.recordAuthenticatedIp(player);
             PlayerSessionManager.bindAuthenticatedIp(player);
 
@@ -335,7 +289,100 @@ public final class ServerNetworkHandler {
 
             IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已通过 PIN 认证", playerName);
             sendResult(server, player, true, "PIN 验证成功，登录已放行");
+
+            // PIN 登录成功后展示 displayId 并告知安全中心
+            if (displayId != null) {
+                sendRawMessage(server, player,
+                        "====================================\n"
+                        + "[IQCL] ✅ 已绑定 IQCL 账号\n"
+                        + "  显示 ID: " + displayId
+                        + (username != null ? "\n  用户名: " + username : "") + "\n"
+                        + "  可在 IQCL 安全中心查看或解绑\n"
+                        + "====================================");
+            }
+
+            // —— PIN 登录后引导：密码设置 / TOTP / IQCL 关联提示 ——
+            if (ModConfig.get().passwordLoginEnabled) {
+                PasswordManager.checkHasPasswordAsync(server, player.getUuid(), hasPassword -> {
+                    server.execute(() -> {
+                        if (player.networkHandler == null || player.isRemoved()) return;
+                        sendPostLoginGuidancePin(player, hasPassword, displayId != null);
+                    });
+                });
+            }
         });
+    }
+
+    /**
+     * PIN 登录成功后的引导消息。
+     *
+     * @param player       玩家
+     * @param hasPassword  是否已注册服务器密码
+     * @param iqclLinked   是否已链接 IQCL 账号（displayId != null）
+     */
+    private static void sendPostLoginGuidancePin(ServerPlayerEntity player,
+                                                   boolean hasPassword, boolean iqclLinked) {
+        player.sendMessage(
+                net.minecraft.text.Text.literal("====================================")
+                        .formatted(net.minecraft.util.Formatting.GOLD), false);
+
+        if (!hasPassword) {
+            // 未注册密码 → 引导设置
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("[IQCL] 你尚未设置服务器密码")
+                            .formatted(net.minecraft.util.Formatting.YELLOW, net.minecraft.util.Formatting.BOLD), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  建议设置一个仅用于本服务器的密码：")
+                            .formatted(net.minecraft.util.Formatting.WHITE), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  /iqcl register password <密码> <确认密码>")
+                            .formatted(net.minecraft.util.Formatting.AQUA), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  此密码仅用于本服务器，与 IQCL 账号密码无关")
+                            .formatted(net.minecraft.util.Formatting.GRAY), false);
+        } else {
+            // 已注册密码 → 提示可修改
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("[IQCL] 密码管理")
+                            .formatted(net.minecraft.util.Formatting.AQUA, net.minecraft.util.Formatting.BOLD), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  修改密码: /iqcl changepassword <旧密码> <新密码>")
+                            .formatted(net.minecraft.util.Formatting.WHITE), false);
+        }
+
+        // TOTP 提示
+        player.sendMessage(
+                net.minecraft.text.Text.literal("")
+                        .formatted(net.minecraft.util.Formatting.RESET), false);
+        player.sendMessage(
+                net.minecraft.text.Text.literal("  双因素认证(TOTP): /iqcl enablerotp")
+                        .formatted(net.minecraft.util.Formatting.GREEN), false);
+        player.sendMessage(
+                net.minecraft.text.Text.literal("  可为密码登录增加额外安全保护")
+                        .formatted(net.minecraft.util.Formatting.GRAY), false);
+
+        // IQCL 关联警告
+        if (!iqclLinked) {
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("")
+                            .formatted(net.minecraft.util.Formatting.RESET), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  ⚠ 未链接 IQCL 账号")
+                            .formatted(net.minecraft.util.Formatting.RED, net.minecraft.util.Formatting.BOLD), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  只有链接了 IQCL 账号才能重置服务器密码")
+                            .formatted(net.minecraft.util.Formatting.GRAY), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  否则忘记密码可能丢失账号管控权")
+                            .formatted(net.minecraft.util.Formatting.GRAY), false);
+            player.sendMessage(
+                    net.minecraft.text.Text.literal("  请执行 /iqcl link 通过 PIN 登录关联 IQCL 账号")
+                            .formatted(net.minecraft.util.Formatting.YELLOW), false);
+        }
+
+        player.sendMessage(
+                net.minecraft.text.Text.literal("====================================")
+                        .formatted(net.minecraft.util.Formatting.GOLD), false);
     }
 
     private static void sendResult(MinecraftServer server, ServerPlayerEntity player,
@@ -367,5 +414,31 @@ public final class ServerNetworkHandler {
                 }
             }
         });
+    }
+
+    /**
+     * 将验证服务器返回的错误消息映射为用户友好的中文提示。
+     * <p>
+     * 特别处理 UUID 绑定冲突（HTTP 200 + success=false）：
+     * 后端返回 "该游戏账号已绑定其他用户" 等信息时，转为简洁友好提示。
+     */
+    private static String resolveFriendlyErrorMessage(String serverMessage) {
+        if (serverMessage == null || serverMessage.isEmpty()) {
+            return "PIN 验证失败";
+        }
+        // UUID 绑定冲突：MC UUID 已被其他 IQCL 账号绑定
+        if (serverMessage.contains("绑定") || serverMessage.contains("已绑定")) {
+            return "此游戏账号已绑定其他 IQCL 账号，请前往 IQCL 安全中心查看或解绑";
+        }
+        // PIN 无效 / 过期
+        if (serverMessage.contains("PIN") && (serverMessage.contains("无效") || serverMessage.contains("过期"))) {
+            return "PIN 码无效或已过期，请重新获取";
+        }
+        // 账号封禁
+        if (serverMessage.contains("封禁") || serverMessage.contains("banned")) {
+            return "账号已被封禁";
+        }
+        // 其他错误直接返回原始消息（截断过长内容）
+        return serverMessage.length() > 200 ? serverMessage.substring(0, 200) + "..." : serverMessage;
     }
 }

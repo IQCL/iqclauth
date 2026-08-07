@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 IQCL
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 package com.iqcl.auth.server;
 
 import com.iqcl.auth.IqclAuth;
@@ -167,10 +174,6 @@ public final class PlayerRestrictionManager {
 
                 // 发送 game-session login
                 String username = player.getEntityName();
-                AuthState.PlayerAuthState st = AuthState.getState(player.getUuid());
-                if (st != null && st.linkedUsername != null) {
-                    username = st.linkedUsername;
-                }
                 ApiGateway.notifyLogin(player.getUuid().toString(), username);
 
                 // 通知客户端设置已登录状态
@@ -192,15 +195,6 @@ public final class PlayerRestrictionManager {
                         player.getEntityName());
                 return;
             }
-        }
-
-        // —— 已关联账号的检查：如果玩家已关联过，提示用绑定的 PIN 登录 ——
-        AuthState.PlayerAuthState state = AuthState.getState(player.getUuid());
-        if (state != null && state.linked) {
-            player.sendMessage(
-                    Text.literal("[IQCL] 你已关联 IQCL 账号 (ID: " + state.linkedDisplayId + ")，" +
-                            "请使用该账号的 PIN 码登录")
-                            .formatted(Formatting.YELLOW), false);
         }
 
         // —— 送入 Limbo 隔离区（仅未命中持久会话的玩家）——
@@ -268,13 +262,18 @@ public final class PlayerRestrictionManager {
                 player, NetworkConstants.S2C_AUTHINFO_ID, buf);
     }
 
-    /** 玩家离开 → 清理会话 + 通知 game-session logout。 */
+    /** 玩家离开 → 清理会话 + 开始离线会话计时 + 通知 game-session logout。 */
     private static void handlePlayerDisconnect(ServerPlayNetworkHandler handler) {
         ServerPlayerEntity player = handler.getPlayer();
         if (player != null) {
             boolean wasAuthed = AuthState.isAuthenticated(player.getUuid());
             String mcUuid = player.getUuid().toString();
             String username = player.getEntityName();
+
+            // 已认证玩家退出后开始计算会话保留时限（sessionTimeoutSeconds 仅对离线生效）
+            if (wasAuthed) {
+                PlayerSessionManager.applyDisconnectSessionTimeout(player.getUuid());
+            }
 
             // 清理会话
             PlayerSessionManager.cleanupSession(player.getUuid());
@@ -297,7 +296,14 @@ public final class PlayerRestrictionManager {
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             boolean authed = AuthState.isAuthenticated(player.getUuid());
 
-            // —— 超时踢出检查 ——
+            // —— 已认证玩家：在线即活动，持续刷新活动时间 ——
+            // 玩家在游戏中（无论是否在移动）始终视为已登录活动中，
+            // 绝不因 session 超时被踢；sessionTimeoutSeconds 仅在退出游戏后生效。
+            if (authed) {
+                AuthState.touchActivity(player.getUuid());
+            }
+
+            // —— 超时踢出检查（实际仅对未认证玩家的登录超时生效）——
             if (AuthState.isTimedOut(player.getUuid(), sessionTimeout, loginTimeout)) {
                 kickPlayer(player, authed);
                 continue;

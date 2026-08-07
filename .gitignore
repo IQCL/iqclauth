@@ -23,3 +23,6 @@ run/
 # OS
 .DS_Store
 Thumbs.db
+
+#CMD
+push.bat

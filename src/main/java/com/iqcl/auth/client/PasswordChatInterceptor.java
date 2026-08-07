@@ -134,7 +134,9 @@ public final class PasswordChatInterceptor {
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player == null) return false;
 
-        if (ClientAuthState.isAuthenticated()) {
+        // 仅 login 在已登录后拒绝；register/changepassword/unregister 均需放行
+        // （PIN 登录后需允许 register 设置密码，changepassword/unregister 需已登录状态）
+        if ("login".equals(op) && ClientAuthState.isAuthenticated()) {
             player.sendMessage(
                     Text.literal("[IQCL] 你已经登录成功，无需重复操作")
                             .formatted(Formatting.YELLOW),
@@ -142,17 +144,13 @@ public final class PasswordChatInterceptor {
             return false;
         }
 
-        if (serverPublicKeyBase64 == null) {
+        if (serverPublicKeyBase64 == null || serverPublicKeyBase64.isEmpty()) {
             displayResult(false, "未收到服务端公钥，请重连服务器");
             return false;
         }
 
         if (!ClientPlayNetworking.canSend(NetworkConstants.C2S_PASSWORD_ID)) {
-            if (IqclAuth.isClientEnvironment()) {
-                displayResult(false, "当前处于单人/联机模式，IQCL Auth 登录需在安装了本模组的专用服务器上使用");
-            } else {
-                displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法执行密码操作");
-            }
+            displayResult(false, "当前服务器未安装 IQCL Auth 模组，无法执行密码操作");
             return false;
         }
 
@@ -203,9 +201,8 @@ public final class PasswordChatInterceptor {
         return false; // 取消原始明文命令
     }
 
-    /** 在客户端聊天框展示最终结果（由 S2C_RESULT_ID 接收器回调）。 */
+    /** 在客户端聊天框展示本地结果（不改动认证状态；服务端结果统一由 ClientAuthState.handleResult 处理）。 */
     public static void displayResult(boolean success, String message) {
-        ClientAuthState.setAuthenticated(success);
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player != null) {
             Formatting color = success ? Formatting.GREEN : Formatting.RED;

@@ -17,6 +17,10 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
 /**
  * 客户端入口（client entrypoint）。
  * <p>
@@ -46,11 +50,9 @@ public class IqclAuthClient implements ClientModInitializer {
                 (client, handler, buf, responseSender) -> {
                     boolean success = buf.readBoolean();
                     String message = buf.readString();
-                    client.execute(() -> {
-                        // 两个拦截器的 displayResult 都会更新 ClientAuthState
-                        PinChatInterceptor.displayResult(success, message);
-                        PasswordChatInterceptor.displayResult(success, message);
-                    });
+                    client.execute(() ->
+                            // 统一入口：仅"登录成功"结果会置位本地认证状态，避免重复打印与状态误判
+                            ClientAuthState.handleResult(success, message));
                 });
 
         // 注册服务端 → 客户端登出通知接收器
@@ -82,28 +84,52 @@ public class IqclAuthClient implements ClientModInitializer {
                     });
                 });
 
-        // 客户端环境提示：单人/联机模式时告知用户 IQCL Auth 登录不可用
+        // 服务端模组检测：延迟检查服务端是否注册了 IQCL Auth 自定义通道
+        // （Fabric 的 EnvType.CLIENT 在所有客户端环境下均为 true，无法区分单人/联机与专用服务器，
+        //  因此改用 canSend 检测服务端是否实际安装了本模组）
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
-            if (IqclAuth.isClientEnvironment()) {
-                client.execute(() -> {
-                    if (client.player != null) {
-                        client.player.sendMessage(
-                                Text.literal("====================================")
-                                        .formatted(Formatting.GOLD), false);
-                        client.player.sendMessage(
-                                Text.literal("[IQCL] 当前处于单人/联机模式")
-                                        .formatted(Formatting.YELLOW, Formatting.BOLD), false);
-                        client.player.sendMessage(
-                                Text.literal("IQCL Auth 登录功能仅在安装了该模组的专用服务器上可用")
-                                        .formatted(Formatting.GRAY), false);
-                        client.player.sendMessage(
-                                Text.literal("====================================")
-                                        .formatted(Formatting.GOLD), false);
-                    }
-                });
-            }
+            client.execute(() -> {
+                // 每次（重）连接都重置本地认证状态，避免残留旧会话状态导致误拦登录
+                ClientAuthState.reset();
+                // 延迟 30 tick（约 1.5 秒），等待服务端通道注册完成
+                client.player.sendMessage(
+                        Text.literal("[IQCL] 正在检测服务器模组支持...")
+                                .formatted(Formatting.GRAY), false);
+                scheduleModCheck(client);
+            });
         });
 
         IqclAuth.LOGGER.info("[IQCL Auth] 客户端初始化完成");
+    }
+
+    /**
+     * 延迟检查服务端是否安装了 IQCL Auth 模组。
+     * 使用 canSend 检测自定义通道是否可用，而非 FabricLoader.getEnvironmentType()（后者在客户端永远为 CLIENT）。
+     */
+    private static void scheduleModCheck(MinecraftClient client) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.schedule(() -> {
+            client.execute(() -> {
+                if (client.player == null) return;
+
+                if (!ClientPlayNetworking.canSend(NetworkConstants.C2S_VERIFY_ID)) {
+                    client.player.sendMessage(
+                            Text.literal("====================================")
+                                    .formatted(Formatting.GOLD), false);
+                    client.player.sendMessage(
+                            Text.literal("[IQCL] 当前服务器未安装 IQCL Auth 模组")
+                                    .formatted(Formatting.YELLOW, Formatting.BOLD), false);
+                    client.player.sendMessage(
+                            Text.literal("IQCL Auth 登录功能仅在安装了该模组的专用服务器上可用")
+                                    .formatted(Formatting.GRAY), false);
+                    client.player.sendMessage(
+                            Text.literal("====================================")
+                                    .formatted(Formatting.GOLD), false);
+                } else {
+                    IqclAuth.LOGGER.info("[IQCL Auth] 服务端模组通道检测成功");
+                }
+            });
+            scheduler.shutdown();
+        }, 1500, TimeUnit.MILLISECONDS);
     }
 }

@@ -60,28 +60,58 @@ public final class ServerKeyStore {
 
         try {
             if (Files.exists(keyFile)) {
-                KeyData data = load(keyFile);
-                keyPair = deserialize(data);
-                // 兼容旧版本：若存储的是 44 字节 DER 编码公钥，仍可通过 X509EncodedKeySpec 恢复
-                publicKeyBase64 = rawPublicKeyBase64(keyPair.getPublic());
-                IqclAuth.LOGGER.info("[IQCL Auth] 已加载服务端 X25519 密钥对");
+                boolean loaded = tryLoad(keyFile);
+                if (!loaded) {
+                    // 旧格式或字段缺失，删除旧文件重新生成
+                    IqclAuth.LOGGER.warn("[IQCL Auth] 旧格式密钥文件不兼容，删除并重新生成: {}", keyFile);
+                    Files.delete(keyFile);
+                    generateAndSave(keyDir, keyFile);
+                }
             } else {
-                Files.createDirectories(keyDir);
-                keyPair = generate();
-                String pubDerB64 = Base64Utils.encode(keyPair.getPublic().getEncoded());
-                String privB64 = Base64Utils.encode(keyPair.getPrivate().getEncoded());
-                publicKeyBase64 = rawPublicKeyBase64(keyPair.getPublic());
-                KeyData data = new KeyData(
-                        KEY_VERSION, pubDerB64, privB64, publicKeyBase64,
-                        System.currentTimeMillis());
-                save(keyFile, data);
-                IqclAuth.LOGGER.info("[IQCL Auth] 已生成并保存服务端 X25519 密钥对: {}", keyFile);
+                generateAndSave(keyDir, keyFile);
             }
         } catch (Exception e) {
             IqclAuth.LOGGER.error("[IQCL Auth] 服务端 X25519 密钥初始化失败，密码登录加密通道不可用", e);
             keyPair = null;
             publicKeyBase64 = null;
         }
+    }
+
+    /**
+     * 尝试从文件加载密钥对。
+     * 返回 true 表示加载成功；false 表示文件格式不兼容，需重新生成。
+     */
+    private static boolean tryLoad(Path keyFile) {
+        try {
+            KeyData data = load(keyFile);
+            if (data.publicKey == null || data.publicKey.isEmpty()
+                    || data.privateKey == null || data.privateKey.isEmpty()) {
+                IqclAuth.LOGGER.warn("[IQCL Auth] 密钥文件缺少必要字段 (publicKey/privateKey)");
+                return false;
+            }
+            keyPair = deserialize(data);
+            // 兼容旧版本：若存储的是 44 字节 DER 编码公钥，仍可通过 X509EncodedKeySpec 恢复
+            publicKeyBase64 = rawPublicKeyBase64(keyPair.getPublic());
+            IqclAuth.LOGGER.info("[IQCL Auth] 已加载服务端 X25519 密钥对");
+            return true;
+        } catch (Exception e) {
+            IqclAuth.LOGGER.warn("[IQCL Auth] 密钥文件加载失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** 生成新密钥对并保存到文件。 */
+    private static void generateAndSave(Path keyDir, Path keyFile) throws Exception {
+        Files.createDirectories(keyDir);
+        keyPair = generate();
+        String pubDerB64 = Base64Utils.encode(keyPair.getPublic().getEncoded());
+        String privB64 = Base64Utils.encode(keyPair.getPrivate().getEncoded());
+        publicKeyBase64 = rawPublicKeyBase64(keyPair.getPublic());
+        KeyData data = new KeyData(
+                KEY_VERSION, pubDerB64, privB64, publicKeyBase64,
+                System.currentTimeMillis());
+        save(keyFile, data);
+        IqclAuth.LOGGER.info("[IQCL Auth] 已生成并保存服务端 X25519 密钥对: {}", keyFile);
     }
 
     /** 是否已初始化密钥对。 */
@@ -107,15 +137,13 @@ public final class ServerKeyStore {
         Path keyDir = FabricLoader.getInstance().getConfigDir()
                 .resolve(IqclAuth.MOD_ID).resolve("keys");
         Path keyFile = keyDir.resolve(KEY_FILE_NAME);
-        Files.createDirectories(keyDir);
-        keyPair = generate();
-        String pubDerB64 = Base64Utils.encode(keyPair.getPublic().getEncoded());
-        String privB64 = Base64Utils.encode(keyPair.getPrivate().getEncoded());
-        publicKeyBase64 = rawPublicKeyBase64(keyPair.getPublic());
-        KeyData data = new KeyData(
-                KEY_VERSION, pubDerB64, privB64, publicKeyBase64,
-                System.currentTimeMillis());
-        save(keyFile, data);
+        try {
+            generateAndSave(keyDir, keyFile);
+        } catch (Exception e) {
+            if (e instanceof GeneralSecurityException) throw (GeneralSecurityException) e;
+            if (e instanceof IOException) throw (IOException) e;
+            throw new IOException("rotate failed", e);
+        }
         IqclAuth.LOGGER.info("[IQCL Auth] 服务端 X25519 密钥对已轮换");
     }
 

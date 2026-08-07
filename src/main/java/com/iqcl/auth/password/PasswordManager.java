@@ -17,7 +17,6 @@ import com.iqcl.auth.password.storage.AccountStorageFactory;
 import com.iqcl.auth.password.storage.StorageExecutor;
 import com.iqcl.auth.server.ApiGateway;
 import com.iqcl.auth.server.AuthState;
-import com.iqcl.auth.server.LinkStore;
 import com.iqcl.auth.server.PlayerSessionManager;
 import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -114,6 +113,25 @@ public final class PasswordManager {
     }
 
     /**
+     * 异步查询玩家是否已注册密码账号。
+     * 结果通过 callback 在主线程回调。
+     */
+    public static void checkHasPasswordAsync(MinecraftServer server, java.util.UUID uuid,
+                                              Consumer<Boolean> callback) {
+        if (storage == null) {
+            server.execute(() -> callback.accept(false));
+            return;
+        }
+        StorageExecutor.submit(server, () -> {
+            try {
+                return storage.exists(uuid);
+            } catch (Exception e) {
+                return false;
+            }
+        }, callback, ex -> server.execute(() -> callback.accept(false)));
+    }
+
+    /**
      * 确认 TOTP 验证完成登录（密码已通过后的第二步）。
      */
     public static void confirmTotpLogin(MinecraftServer server, ServerPlayerEntity player,
@@ -183,10 +201,6 @@ public final class PasswordManager {
         // 前置状态检查（主线程同步）
         if (AuthState.isAuthenticated(player.getUuid())) {
             callback.accept(Result.fail("你已登录，无需重复操作"));
-            return;
-        }
-        if (AuthState.hasPendingLink(player.getUuid())) {
-            callback.accept(Result.fail("你正在 IQCL 关联确认中，请先 /iqcl link 或 /iqcl cancel"));
             return;
         }
         // 会话锁定检查（异地登录后短时间内拒绝登录）
@@ -267,11 +281,6 @@ public final class PasswordManager {
                                 String password, String confirm, Consumer<Result> callback) {
         if (!checkAvailable(server, player, callback)) return;
 
-        if (AuthState.hasPendingLink(player.getUuid())) {
-            callback.accept(Result.fail("你正在 IQCL 关联确认中，请先 /iqcl link 或 /iqcl cancel"));
-            return;
-        }
-
         // 策略校验（主线程同步）
         PasswordPolicy.ValidationResult vr = PasswordPolicy.validate(password);
         if (!vr.isValid()) {
@@ -314,11 +323,19 @@ public final class PasswordManager {
                 PasswordHasher.zero(pwd);
             }
         }, result -> {
-            sendResult(player, result.success, result.message);
+            // 注册成功消息根据登录状态调整
+            if (result.success) {
+                String msg = AuthState.isAuthenticated(player.getUuid())
+                        ? "密码设置成功，可使用 /iqcl changepassword <旧密码> <新密码> 修改"
+                        : "密码账号注册成功，请使用 /iqcl login password <密码> 登录";
+                sendResult(player, true, msg);
+            } else {
+                sendResult(player, false, result.message);
+            }
             // 注册成功后建议关联 IQCL 账号
             if (result.success && cfg.promptIqclLinkAfterPasswordLogin) {
                 player.sendMessage(
-                        Text.literal("[IQCL] 建议执行 /iqcl login pin <PIN码> 关联 IQCL 账号，便于跨服找回密码与统一身份管理")
+                        Text.literal("[IQCL] 建议执行 /iqcl link 通过 PIN 登录关联 IQCL 账号，便于跨服统一身份管理")
                                 .formatted(Formatting.AQUA),
                         false);
             }
@@ -535,40 +552,84 @@ public final class PasswordManager {
                 return;
             }
 
-            // 检查 IQCL 关联
-            LinkStore.LinkData link = LinkStore.load(uuid);
-            Integer displayId = (link != null) ? link.displayId : null;
-            String linkedUsername = (link != null) ? link.username : null;
-
-            // 防多开（仅当已关联 IQCL 账号）
-            if (displayId != null) {
-                PlayerSessionManager.enforceSingleAccount(player, displayId);
-            }
-
             // 标记认证 + 持久会话 + Limbo 恢复
+            // （密码登录不设置 displayId，绑定逻辑由 PIN 登录路径完成后端接管）
             AuthState.authenticate(player);
+            AuthState.setLoginMethod(uuid, "password");
             PlayerSessionManager.recordAuthenticatedIp(player);
             PlayerSessionManager.bindAuthenticatedIp(player);
             PlayerSessionManager.restoreFromLimbo(player);
 
             // 通知 game-session login
-            String notifyName = (linkedUsername != null) ? linkedUsername : playerName;
-            ApiGateway.notifyLogin(uuid.toString(), notifyName);
+            ApiGateway.notifyLogin(uuid.toString(), playerName);
 
-            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已通过密码认证 (linked={})",
-                    playerName, displayId != null);
+            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 已通过密码认证", playerName);
 
             // 通知客户端
             sendResult(player, true, "密码登录成功，欢迎回来！");
 
-            // 未关联 IQCL 账号时建议关联
-            if (displayId == null && ModConfig.get().promptIqclLinkAfterPasswordLogin) {
-                player.sendMessage(
-                        Text.literal("[IQCL] 提示：执行 /iqcl login pin <PIN码> 可关联 IQCL 账号，便于跨服找回密码与统一身份管理")
-                                .formatted(Formatting.AQUA),
-                        false);
+            // 提示关联 IQCL 账号
+            if (ModConfig.get().promptIqclLinkAfterPasswordLogin) {
+                sendPostLoginGuidancePassword(player, false);
+            } else {
+                sendPostLoginGuidancePassword(player, true);
             }
         });
+    }
+
+    /**
+     * 密码登录成功后的引导消息。
+     *
+     * @param player      玩家
+     * @param showIqclTip 是否显示 IQCL 关联提示
+     */
+    private static void sendPostLoginGuidancePassword(ServerPlayerEntity player,
+                                                        boolean showIqclTip) {
+        player.sendMessage(
+                Text.literal("====================================")
+                        .formatted(Formatting.GOLD), false);
+
+        // 引导 PIN 登录
+        player.sendMessage(
+                Text.literal("[IQCL] 安全建议")
+                        .formatted(Formatting.AQUA, Formatting.BOLD), false);
+        player.sendMessage(
+                Text.literal("  建议同时使用 PIN 登录关联 IQCL 账号")
+                        .formatted(Formatting.WHITE), false);
+        player.sendMessage(
+                Text.literal("  以便跨服统一身份管理")
+                        .formatted(Formatting.GRAY), false);
+
+        // TOTP 提示
+        player.sendMessage(
+                Text.literal("")
+                        .formatted(Formatting.RESET), false);
+        player.sendMessage(
+                Text.literal("  双因素认证(TOTP): /iqcl enablerotp")
+                        .formatted(Formatting.GREEN), false);
+        player.sendMessage(
+                Text.literal("  可为密码登录增加额外安全保护")
+                        .formatted(Formatting.GRAY), false);
+
+        // IQCL 关联警告
+        if (showIqclTip) {
+            player.sendMessage(
+                    Text.literal("")
+                            .formatted(Formatting.RESET), false);
+            player.sendMessage(
+                    Text.literal("  ⚠ 只有链接了 IQCL 账号才能重置服务器密码")
+                            .formatted(Formatting.RED), false);
+            player.sendMessage(
+                    Text.literal("  否则忘记密码可能丢失账号管控权")
+                            .formatted(Formatting.GRAY), false);
+            player.sendMessage(
+                    Text.literal("  执行 /iqcl link 通过 PIN 登录关联 IQCL 账号")
+                            .formatted(Formatting.YELLOW), false);
+        }
+
+        player.sendMessage(
+                Text.literal("====================================")
+                        .formatted(Formatting.GOLD), false);
     }
 
     // ========== 内部工具 ==========

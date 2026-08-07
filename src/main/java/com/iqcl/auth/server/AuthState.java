@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 IQCL
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 package com.iqcl.auth.server;
 
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -11,11 +18,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>
  * 追踪每个玩家的：
  * <ul>
- *   <li>当前是否已通过 PIN 验证（{@code authenticated}）</li>
+ *   <li>当前是否已通过验证（{@code authenticated}）</li>
  *   <li>上次活动时间（用于超时踢出）</li>
  *   <li>加入时间（用于首次宽限时间）</li>
+ *   <li>当前会话绑定的 IQCL 账户信息（{@code currentDisplayId}/{@code currentUsername}，仅 PIN 登录后设置，不持久化）</li>
  * </ul>
  * 线程安全，可在工作线程与服务端主线程并发访问。
+ * <p>
+ * 注意：本地不再持久化 UUID↔displayId 绑定关系，绑定逻辑已由 IQCL 后端接管。
+ * 此处的 currentDisplayId/currentUsername 仅用于当前会话的防多开与消息展示，登出即清除。
  */
 public final class AuthState {
 
@@ -25,20 +36,10 @@ public final class AuthState {
     private AuthState() {
     }
 
-    /** 记录玩家加入（尚未认证）。从磁盘加载已保存的关联信息。 */
+    /** 记录玩家加入（尚未认证）。 */
     public static void onPlayerJoin(ServerPlayerEntity player) {
         long now = System.currentTimeMillis();
-        PlayerAuthState state = new PlayerAuthState(false, now, now);
-
-        // 从磁盘加载关联信息
-        LinkStore.LinkData linkData = LinkStore.load(player.getUuid());
-        if (linkData != null && linkData.displayId != null) {
-            state.linkedDisplayId = linkData.displayId;
-            state.linkedUsername = linkData.username;
-            state.linked = true;
-        }
-
-        STATES.put(player.getUuid(), state);
+        STATES.put(player.getUuid(), new PlayerAuthState(false, now, now));
     }
 
     /** 记录玩家离线，清理状态。 */
@@ -46,7 +47,7 @@ public final class AuthState {
         STATES.remove(uuid);
     }
 
-    /** 标记玩家已通过 PIN 验证。 */
+    /** 标记玩家已通过验证。 */
     public static void authenticate(ServerPlayerEntity player) {
         PlayerAuthState state = STATES.get(player.getUuid());
         if (state != null) {
@@ -59,74 +60,43 @@ public final class AuthState {
     }
 
     /**
-     * 标记玩家 PIN 验证通过，保存 IQCL 账号信息供 /link 使用。
-     * 注意：此方法不设置 authenticated=true，玩家仍处于"待关联"状态，
-     * 需要执行 /iqcl link 后才算真正登录。
+     * 记录玩家 PIN 验证通过，设置当前会话绑定的 IQCL 账户信息。
+     * <p>
+     * 该信息仅保存在内存中，不持久化到磁盘。登出时清除。
+     * 用于防多开（displayId 唯一在线）与 game-session 通知。
      *
-     * @param displayId    IQCL 显示 ID（可为 null）
-     * @param username     IQCL 用户名（可为 null）
-     * @param permission   权限等级
+     * @param displayId  IQCL 显示 ID（可为 null）
+     * @param username   IQCL 用户名（可为 null）
+     * @param permission 权限等级
      */
-    public static void authenticateWithAccount(ServerPlayerEntity player,
-                                               Integer displayId, String username,
-                                               String permission) {
+    public static void setCurrentAccount(ServerPlayerEntity player,
+                                          Integer displayId, String username,
+                                          String permission) {
         PlayerAuthState state = STATES.get(player.getUuid());
         if (state != null) {
-            // 不设置 authenticated=true，玩家处于待关联状态
-            state.lastActivityMs = System.currentTimeMillis();
-            state.pendingDisplayId = displayId;
-            state.pendingUsername = username;
+            state.currentDisplayId = displayId;
+            state.currentUsername = username;
             state.permission = permission;
         } else {
             long now = System.currentTimeMillis();
             PlayerAuthState newState = new PlayerAuthState(false, now, now);
-            newState.pendingDisplayId = displayId;
-            newState.pendingUsername = username;
+            newState.currentDisplayId = displayId;
+            newState.currentUsername = username;
             newState.permission = permission;
             STATES.put(player.getUuid(), newState);
         }
     }
 
-    /**
-     * 确认账号关联：将 pending 账户信息标记为已关联，并持久化到磁盘。
-     */
-    public static void confirmLink(UUID uuid) {
+    /** 获取玩家当前会话绑定的 IQCL displayId（仅 PIN 登录后非 null）。 */
+    public static Integer getCurrentDisplayId(UUID uuid) {
         PlayerAuthState state = STATES.get(uuid);
-        if (state != null) {
-            state.linkedDisplayId = state.pendingDisplayId;
-            state.linkedUsername = state.pendingUsername;
-            state.linked = true;
-            state.pendingDisplayId = null;
-            state.pendingUsername = null;
-
-            // 持久化到磁盘
-            if (state.linkedDisplayId != null) {
-                LinkStore.save(uuid, state.linkedDisplayId, state.linkedUsername);
-            }
-        }
+        return state != null ? state.currentDisplayId : null;
     }
 
-    /**
-     * 取消待关联状态（PIN 验证成功但玩家未 link 就超时/登出）。
-     */
-    public static void cancelPendingLink(UUID uuid) {
+    /** 获取玩家当前会话绑定的 IQCL 用户名（仅 PIN 登录后非 null）。 */
+    public static String getCurrentUsername(UUID uuid) {
         PlayerAuthState state = STATES.get(uuid);
-        if (state != null) {
-            state.pendingDisplayId = null;
-            state.pendingUsername = null;
-        }
-    }
-
-    /** 玩家是否已完成账号关联。 */
-    public static boolean isLinked(UUID uuid) {
-        PlayerAuthState state = STATES.get(uuid);
-        return state != null && state.linked;
-    }
-
-    /** 玩家是否有待确认的关联（PIN 验证成功但未 /link）。 */
-    public static boolean hasPendingLink(UUID uuid) {
-        PlayerAuthState state = STATES.get(uuid);
-        return state != null && state.pendingDisplayId != null;
+        return state != null ? state.currentUsername : null;
     }
 
     /** 获取玩家的 IQCL 权限等级（trial/formal/banned，可能为 null）。 */
@@ -135,19 +105,21 @@ public final class AuthState {
         return state != null ? state.permission : null;
     }
 
-    /** 登出：清除认证状态，但保留关联信息（关联是永久性的）。 */
+    /** 登出：清除认证状态与会话账户信息。 */
     public static void logout(ServerPlayerEntity player) {
         PlayerAuthState state = STATES.get(player.getUuid());
+        long now = System.currentTimeMillis();
         if (state != null) {
-            // 保留 linkedDisplayId/linkedUsername/linked 状态
-            // 只清除认证和 pending 状态
             state.authenticated = false;
-            state.lastActivityMs = System.currentTimeMillis();
-            state.pendingDisplayId = null;
-            state.pendingUsername = null;
+            // 未认证超时/宽限期从登出时刻重新起算，避免登出后立即被登录超时踢出
+            state.joinMs = now;
+            state.lastActivityMs = now;
+            state.currentDisplayId = null;
+            state.currentUsername = null;
             state.permission = null;
+            state.pendingTotp = false;
+            state.totpPendingAction = null;
         } else {
-            long now = System.currentTimeMillis();
             STATES.put(player.getUuid(), new PlayerAuthState(false, now, now));
         }
     }
@@ -158,7 +130,7 @@ public final class AuthState {
         return state != null && state.authenticated;
     }
 
-    /** 更新玩家最近活动时间（通过 PIN 时调用）。 */
+    /** 更新玩家最近活动时间（在线已认证玩家每 tick 刷新；在线即活动，不会因 session 超时被踢）。 */
     public static void touchActivity(UUID uuid) {
         PlayerAuthState state = STATES.get(uuid);
         if (state != null) {
@@ -181,8 +153,13 @@ public final class AuthState {
 
     /**
      * 检查玩家是否已超时。
+     * <p>
+     * 已认证玩家在线期间由 tick 循环持续刷新活动时间，session 超时分支实际不会命中；
+     * sessionTimeoutSeconds 在玩家退出后通过收紧持久会话过期时间生效（见
+     * {@link PlayerSessionManager#applyDisconnectSessionTimeout}）。
+     *
      * @param uuid 玩家 UUID
-     * @param sessionTimeout 已认证玩家 session 超时（秒）
+     * @param sessionTimeout 已认证玩家 session 超时（秒），仅离线语义保留
      * @param loginTimeout 未认证玩家登录超时（秒）
      */
     public static boolean isTimedOut(UUID uuid, int sessionTimeout, int loginTimeout) {
@@ -215,22 +192,17 @@ public final class AuthState {
     /** 单玩家状态记录。 */
     public static final class PlayerAuthState {
         public volatile boolean authenticated;
-        public final long joinMs;
+        /** 未认证超时/宽限期的起算时刻（进服时设置，登出时重置）。 */
+        public volatile long joinMs;
         public volatile long lastActivityMs;
 
-        // —— IQCL 账号关联信息 ——
-        /** 待确认关联的 IQCL displayId（PIN 验证成功后暂存，/link 确认后移入 linked） */
-        public volatile Integer pendingDisplayId;
-        /** 待确认关联的 IQCL username */
-        public volatile String pendingUsername;
-        /** 已关联的 IQCL displayId */
-        public volatile Integer linkedDisplayId;
-        /** 已关联的 IQCL username */
-        public volatile String linkedUsername;
+        // —— 当前会话 IQCL 账户信息（仅内存，不持久化）——
+        /** 当前会话绑定的 IQCL displayId（PIN 登录后设置，登出清除） */
+        public volatile Integer currentDisplayId;
+        /** 当前会话绑定的 IQCL 用户名 */
+        public volatile String currentUsername;
         /** 权限等级: trial / formal / banned */
         public volatile String permission;
-        /** 是否已完成账号关联（/link 确认后为 true） */
-        public volatile boolean linked;
 
         // —— TOTP 双因素认证状态 ——
         /** 密码已验证通过，等待 TOTP 验证码 */
@@ -238,18 +210,19 @@ public final class AuthState {
         /** TOTP 验证通过后要执行的完成回调类型（password / pin） */
         public volatile String totpPendingAction;
 
+        /** 本次会话的登录方式: "pin" 或 "password"（登录成功后设置） */
+        public volatile String loginMethod;
+
         PlayerAuthState(boolean authenticated, long joinMs, long lastActivityMs) {
             this.authenticated = authenticated;
             this.joinMs = joinMs;
             this.lastActivityMs = lastActivityMs;
-            this.pendingDisplayId = null;
-            this.pendingUsername = null;
-            this.linkedDisplayId = null;
-            this.linkedUsername = null;
+            this.currentDisplayId = null;
+            this.currentUsername = null;
             this.permission = null;
-            this.linked = false;
             this.pendingTotp = false;
             this.totpPendingAction = null;
+            this.loginMethod = null;
         }
     }
 
@@ -283,5 +256,19 @@ public final class AuthState {
             state.pendingTotp = false;
             state.totpPendingAction = null;
         }
+    }
+
+    /** 设置玩家本次会话的登录方式。 */
+    public static void setLoginMethod(UUID uuid, String method) {
+        PlayerAuthState state = STATES.get(uuid);
+        if (state != null) {
+            state.loginMethod = method;
+        }
+    }
+
+    /** 获取玩家本次会话的登录方式（"pin" / "password" / null）。 */
+    public static String getLoginMethod(UUID uuid) {
+        PlayerAuthState state = STATES.get(uuid);
+        return state != null ? state.loginMethod : null;
     }
 }

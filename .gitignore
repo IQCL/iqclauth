@@ -15,6 +15,7 @@ classes/
 .classpath
 .factorypath
 bin/
+.trae/
 
 # Minecraft / Loom
 run/

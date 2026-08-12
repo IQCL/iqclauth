@@ -3,6 +3,7 @@
   "id": "iqclauth",
   "version": "${version}",
   "name": "IQCL Auth",
+  "icon": "assets/iqclauth/icon.png",
   "description": "Fabric 双端模组：客户端 RSA-OAEP 加密 PIN、服务端透明转发至远程验证服务器并执行 Ed25519 验签。PIN 明文永不离开客户端。",
   "authors": [
     "IQCL"

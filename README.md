@@ -1,6 +1,6 @@
 # IQCL Auth — Fabric 1.20.1 双端认证模组
 
-> 官方站点：<https://www.iqcl.de5.net> ｜ 源码仓库：<https://github.com/IQCL/iqclauth> ｜ 当前版本：`0.1.0-beta`
+> 官方站点：<https://www.iqcl.de5.net> ｜ 源码仓库：<https://github.com/IQCL/iqclauth> ｜ 当前版本：`1.0.0`
 
 基于 Fabric Loader 的双端（客户端 + 服务端）认证模组，提供两种互相打通的登录方式，并内置会话治理、防多开、TOTP 2FA、Limbo 隔离区、坐标保护等完整安全栈。所有远程验证服务均由 **IQCL 官方域 `www.iqcl.de5.net`** 提供。
 
@@ -101,7 +101,7 @@ MC 客户端(模组)   → 聊天框展示成功/失败
 iqclauth/
 ├── build.gradle                         # Loom 构建脚本，含数据库驱动嵌套 JAR
 ├── settings.gradle
-├── gradle.properties                    # 版本与依赖配置（mod_version=0.1.0-beta）
+├── gradle.properties                    # 版本与依赖配置（mod_version=1.0.0）
 ├── gradle/wrapper/gradle-wrapper.properties
 ├── LICENSE                             # MPL-2.0
 └── src/main/
@@ -202,14 +202,14 @@ gradlew.bat build
 
 产物位于 `build/libs/`：
 
-- `iqclauth-0.1.0-beta.jar` — 模组主包（内含全部驱动嵌套 JAR：SQLite/MySQL/Postgres/MongoDB + HikariCP）
-- `iqclauth-0.1.0-beta-sources.jar` — 源码包
+- `iqclauth-1.0.0.jar` — 模组主包（内含全部驱动嵌套 JAR：SQLite/MySQL/Postgres/MongoDB + HikariCP）
+- `iqclauth-1.0.0-sources.jar` — 源码包
 
 ## 部署
 
 ### 1. 安装模组
 
-将 `iqclauth-0.1.0-beta.jar` 放入：
+将 `iqclauth-1.0.0.jar` 放入：
 
 | 端 | mods 目录 |
 | --- | --- |

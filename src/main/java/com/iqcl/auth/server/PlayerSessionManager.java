@@ -390,10 +390,15 @@ public final class PlayerSessionManager {
     /**
      * 玩家退出游戏后开始计算会话保留时限。
      * <p>
-     * 将持久会话过期时间收紧为"退出时刻 + sessionTimeoutSeconds"：
+     * 无条件将持久会话过期时间设置为"退出时刻 + sessionTimeoutSeconds"：
      * 在线期间玩家始终视为活动中（不踢），退出后在此时限内重连仍可自动恢复登录，
      * 超过后持久会话失效，需重新输入凭证。sessionTimeoutSeconds &lt;= 0 表示不收紧，
      * 仍沿用登录时写入的 sessionMaxAgeSeconds 过期时间。
+     * <p>
+     * 【为何无条件设置】若仅在 newExpireAt &lt; 旧 expireAtMs 时收紧，则当玩家在线时长
+     * 超过 sessionMaxAgeSeconds（持久会话在在线期间已过期）时退出，旧 expireAtMs 已是过去时间，
+     * newExpireAt（未来）&lt; 旧 expireAtMs（过去）恒为 false，不会重新给予重连宽限期，
+     * 导致玩家重连无法自动恢复。无条件设置保证退出后总能获得 sessionTimeoutSeconds 宽限期。
      */
     public static void applyDisconnectSessionTimeout(UUID uuid) {
         ModConfig config = ModConfig.get();
@@ -403,12 +408,12 @@ public final class PlayerSessionManager {
         SessionData session = PERSISTENT_SESSIONS.get(uuid);
         if (session == null) return;
 
+        // 无条件设置为"退出时刻 + sessionTimeoutSeconds"
+        // 无论是收紧过长 session，还是为已过期 session 重新给予宽限期
         long newExpireAt = System.currentTimeMillis() + timeoutSeconds * 1000L;
-        if (newExpireAt < session.expireAtMs) {
-            PERSISTENT_SESSIONS.put(uuid, new SessionData(session.ip, newExpireAt));
-            IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 退出游戏，会话保留 {} 秒（至过期）",
-                    uuid, timeoutSeconds);
-        }
+        PERSISTENT_SESSIONS.put(uuid, new SessionData(session.ip, newExpireAt));
+        IqclAuth.LOGGER.info("[IQCL Auth] 玩家 {} 退出游戏，会话保留 {} 秒（至过期）",
+                uuid, timeoutSeconds);
     }
 
     // ========== 异地登录检测 ==========

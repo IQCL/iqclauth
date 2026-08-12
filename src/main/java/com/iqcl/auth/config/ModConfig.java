@@ -43,8 +43,32 @@ public class ModConfig {
 
     // ========== 基础配置 ==========
 
-    /** 服务端身份密钥，作为 X-Server-Key 请求头发送给验证服务器。 */
+    /**
+     * 服务端身份密钥（存量旧密钥），作为 X-Server-Key 请求头发送给验证服务器。
+     * <p>
+     * 仅在未配置 apiId/apiKey 成套模式时作为回退鉴权方式使用（API 文档 2.3 节）。
+     */
     public String serverKey = "REPLACE_WITH_YOUR_X_SERVER_KEY";
+
+    /**
+     * API 调用标识（成套模式），如 {@code mc_login_1}，作为 X-Api-Id 请求头发送给验证服务器。
+     * <p>
+     * 必须与 {@link #apiKey} 配套使用（API 文档 2.3 节成套模式）。
+     * verify-pin 请求体是客户端密文包需原样转发（不可信节点约束），
+     * 因此本模组统一用请求头 X-Api-Id + X-Api-Key 传入，不塞进客户端密文包。
+     * 必须为 mc_login 用途且与 apiKey 同一所有者。
+     * 未配置（保持 REPLACE_WITH 前缀）时回退使用 {@link #serverKey}。
+     */
+    public String apiId = "REPLACE_WITH_YOUR_API_ID";
+
+    /**
+     * API 调用密钥（成套模式），与 {@link #apiId} 配套，作为 X-Api-Key 请求头发送。
+     * <p>
+     * 【安全】此密钥为服务器凭证，仅由 MC 服务端持有，<b>禁止硬编码到客户端模组</b>。
+     * 客户端密文包仅含 v/ts/nonce/ciphertext，由 MC 服务端转发时附加本请求头。
+     * 未配置（保持 REPLACE_WITH 前缀）时回退使用 {@link #serverKey}。
+     */
+    public String apiKey = "REPLACE_WITH_YOUR_API_KEY";
 
     /**
      * 玩家进服后的宽限时间（秒）。

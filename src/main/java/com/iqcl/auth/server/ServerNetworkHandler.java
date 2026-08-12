@@ -39,7 +39,9 @@ import java.util.concurrent.Executors;
  * <ol>
  *   <li>接收客户端 C2S 密文数据包（<b>不解密 ciphertext</b>，MC 服务端无 RSA 私钥）；</li>
  *   <li>异步 POST 转发完整密文包至远程验证服务器
- *       （Content-Type: application/json，X-Server-Key: <配置>，body = 原始密文包 JSON）；</li>
+ *       （Content-Type: application/json，鉴权按 API 文档 2.3 节：
+ *        优先 X-Api-Id + X-Api-Key 成套模式，未配置时回退 X-Server-Key，
+ *        body = 原始密文包 JSON 原样转发）；</li>
  *   <li>接收验证服务器返回的 Ed25519 签名响应；</li>
  *   <li>对 payload 执行规范化 JSON 序列化后验证 Ed25519 签名；</li>
  *   <li>验签失败 → 直接判定登录失败；验签成功 → 检查 payload.permission，banned 拒绝；</li>
@@ -104,10 +106,30 @@ public final class ServerNetworkHandler {
             IqclAuth.LOGGER.debug("[IQCL Auth] [{}] 准备发送 HTTP 请求至 {}",
                     playerName, ModConfig.VERIFY_API_URL);
 
-            HttpRequest request = HttpRequest.newBuilder()
+            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(ModConfig.VERIFY_API_URL))
-                    .header("Content-Type", "application/json")
-                    .header("X-Server-Key", config.serverKey)
+                    .header("Content-Type", "application/json");
+
+            // —— 鉴权（API 文档 2.3 节）：优先 apiId + apiKey 成套模式，未配置时回退 X-Server-Key ——
+            // 客户端密文包需原样转发（不可信节点约束），因此 apiId/apiKey 通过请求头附加，不塞进请求体
+            boolean apiIdConfigured = config.apiId != null && !config.apiId.isEmpty()
+                    && !config.apiId.startsWith("REPLACE_WITH");
+            boolean apiKeyConfigured = config.apiKey != null && !config.apiKey.isEmpty()
+                    && !config.apiKey.startsWith("REPLACE_WITH");
+            if (apiIdConfigured && apiKeyConfigured) {
+                // 成套模式：X-Api-Id + X-Api-Key（规范 2.3 节优先）
+                requestBuilder.header("X-Api-Id", config.apiId);
+                requestBuilder.header("X-Api-Key", config.apiKey);
+            } else {
+                // 回退模式：X-Server-Key（存量旧密钥，规范 2.3 节兼容）
+                requestBuilder.header("X-Server-Key", config.serverKey);
+                // 仅配置了 apiId 而 apiKey 缺失时告警（成套模式必须同时提供）
+                if (apiIdConfigured != apiKeyConfigured) {
+                    IqclAuth.LOGGER.warn("[IQCL Auth] [{}] apiId/apiKey 未成套配置，回退使用 X-Server-Key",
+                            playerName);
+                }
+            }
+            HttpRequest request = requestBuilder
                     .POST(HttpRequest.BodyPublishers.ofString(packetJson, StandardCharsets.UTF_8))
                     .timeout(Duration.ofSeconds(15))
                     .build();

@@ -127,7 +127,7 @@ public final class PinChatInterceptor {
             }
             bindTarget = player.getUuid().toString();
 
-            // 2. 构造待加密明文 JSON
+            // 2. 构造待加密明文 JSON（API 文档 2.4 节）
             //    {"pin":"<pin>","bindTarget":"<uuid-with-dashes>"}
             JsonObject plaintext = new JsonObject();
             plaintext.addProperty("pin", pin);
@@ -139,8 +139,11 @@ public final class PinChatInterceptor {
             byte[] cipherBytes = RsaOaepEncryptor.encrypt(
                     plaintextJson.getBytes(StandardCharsets.UTF_8));
 
-            // 4. 组装上行请求包
+            // 4. 组装上行请求包（API 文档 2.4 节）
             //    {"v":1,"ts":<UTC毫秒>,"nonce":"<32hex>","ciphertext":"<base64>"}
+            //    【注意】客户端密文包不含 apiId/apiKey：MC 服务端为不可信转发节点，
+            //    由其在转发时通过 X-Api-Id + X-Api-Key 请求头附加成套鉴权凭证
+            //    （apiKey 为服务器密钥，禁止硬编码到客户端模组分发给玩家）
             JsonObject packet = new JsonObject();
             packet.addProperty("v", 1);
             packet.addProperty("ts", Instant.now().toEpochMilli());

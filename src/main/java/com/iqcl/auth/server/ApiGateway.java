@@ -79,10 +79,28 @@ public final class ApiGateway {
                 ModConfig config = ModConfig.get();
                 String json = body.toString();
 
-                HttpRequest request = HttpRequest.newBuilder()
+                HttpRequest.Builder builder = HttpRequest.newBuilder()
                         .uri(URI.create(url))
-                        .header("Content-Type", "application/json")
-                        .header("X-Server-Key", config.serverKey)
+                        .header("Content-Type", "application/json");
+
+                // —— 鉴权（API 文档 2.3 节）：优先 apiId + apiKey 成套模式，未配置时回退 X-Server-Key ——
+                boolean apiIdConfigured = config.apiId != null && !config.apiId.isEmpty()
+                        && !config.apiId.startsWith("REPLACE_WITH");
+                boolean apiKeyConfigured = config.apiKey != null && !config.apiKey.isEmpty()
+                        && !config.apiKey.startsWith("REPLACE_WITH");
+                if (apiIdConfigured && apiKeyConfigured) {
+                    // 成套模式：X-Api-Id + X-Api-Key（规范 2.3 节优先）
+                    builder.header("X-Api-Id", config.apiId);
+                    builder.header("X-Api-Key", config.apiKey);
+                } else {
+                    // 回退模式：X-Server-Key（存量旧密钥）
+                    builder.header("X-Server-Key", config.serverKey);
+                    if (apiIdConfigured != apiKeyConfigured) {
+                        IqclAuth.LOGGER.warn("[IQCL Auth] game-session {} apiId/apiKey 未成套配置，回退 X-Server-Key",
+                                action);
+                    }
+                }
+                HttpRequest request = builder
                         .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
                         .timeout(Duration.ofSeconds(10))
                         .build();

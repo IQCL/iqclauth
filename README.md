@@ -33,7 +33,8 @@ MC 客户端(模组)
   ▼
 MC 服务端(模组)   ← 不可信转发节点，无 RSA 私钥，不解密 ciphertext
   │  ④ 原样 POST 密文包 → https://www.iqcl.de5.net/api/verify-pin
-  │     Header: Content-Type: application/json, X-Server-Key: <配置>
+  │     Header: Content-Type: application/json
+  │            鉴权优先 X-Api-Id + X-Api-Key（成套模式），未配置时回退 X-Server-Key
   ▼
 IQCL 验证服务器 (www.iqcl.de5.net)
   │  ⑤ RSA 解密 → 校验 PIN → 生成 Ed25519 签名响应
@@ -152,7 +153,7 @@ iqclauth/
         │       ├── MongoAccountStorage.java
         │       └── StorageExecutor.java         # 异步线程池
         └── server/
-            ├── ApiGateway.java          # 远程 API 调用封装（含 X-Server-Key 头）
+            ├── ApiGateway.java          # 远程 API 调用封装（成套鉴权 X-Api-Id/X-Api-Key，回退 X-Server-Key）
             ├── AuthState.java           # 玩家认证状态机
             ├── CommandRegistry.java     # /iqcl 全部指令注册
             ├── PlayerRestrictionManager.java # 行为限制（事件 + 包级双层）
@@ -222,22 +223,41 @@ gradlew.bat build
 
 首次启动服务端后，会在 `config/iqclauth.json` 生成默认配置。
 
-#### 2.1 必填：服务端身份密钥
+#### 2.1 必填：服务端鉴权凭证（apiId + apiKey 成套模式，推荐）
+
+模组对 `https://www.iqcl.de5.net` 的所有 API 调用（verify-pin、game-session/login、game-session/logout）均需鉴权，按 API 文档 2.3 节优先级：
+
+1. **成套模式（推荐）**：`apiId` + `apiKey` 同时配置 → 请求头携带 `X-Api-Id` + `X-Api-Key`
+2. **回退模式（兼容存量旧部署）**：未配置 apiId/apiKey → 请求头携带 `X-Server-Key`
 
 ```json
 {
+  "apiId": "REPLACE_WITH_YOUR_API_ID",
+  "apiKey": "REPLACE_WITH_YOUR_API_KEY",
   "serverKey": "REPLACE_WITH_YOUR_X_SERVER_KEY"
 }
 ```
 
-`serverKey` 获取流程：
+凭证获取流程：
 
 1. 在 **[IQCL | 工单中心](https://www.iqcl.de5.net/tickets/)** 提交工单，填入服务器信息及能证明你是所有人的详尽材料；
 2. 等待审核通过；
-3. 在 **[IQCL | 用户中心](https://www.iqcl.de5.net/auth/user/#pin)** 中兑换 `serverKey`；
+3. 在 **[IQCL | 用户中心](https://www.iqcl.de5.net/auth/user/#pin)** 中兑换 API 调用凭证（成套的 `apiId` + `apiKey`，或存量 `serverKey`）；
 4. 填入 `config/iqclauth.json` 后重启服务端。
 
-`serverKey` 会作为 `X-Server-Key` 请求头发送给 `https://www.iqcl.de5.net`，用于服务端身份识别。
+字段说明：
+
+| 字段 | 鉴权模式 | 请求头 | 说明 |
+| --- | --- | --- | --- |
+| `apiId` | 成套模式（优先） | `X-Api-Id` | API 调用标识（如 `mc_login_1`），必须为 `mc_login` 用途 |
+| `apiKey` | 成套模式（优先） | `X-Api-Key` | 与 `apiId` 配套的密钥，必须同时配置才能启用成套模式 |
+| `serverKey` | 回退模式（兼容） | `X-Server-Key` | 存量旧密钥，仅在 apiId/apiKey 未成套配置时使用 |
+
+> **鉴权规则**：
+> - `apiId` 与 `apiKey` 必须成套配置（两者同时提供），缺一不可；
+> - 仅配置其中之一时启动会告警，并自动回退使用 `serverKey`；
+> - 两者均未配置（保持 `REPLACE_WITH` 前缀）时使用 `serverKey`；
+> - **`apiKey` 为服务器凭证，仅由 MC 服务端持有，禁止硬编码到客户端模组**。客户端密文包仅含 `v/ts/nonce/ciphertext`，由 MC 服务端转发时附加鉴权请求头（符合"MC 服务端为不可信转发节点，仅透明转发密文包"的架构约束）。
 
 #### 2.2 远程 API 地址（硬编码常量，不可修改）
 
@@ -253,7 +273,9 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 
 | 分组 | 字段 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| 基础 | `serverKey` | `REPLACE_WITH_YOUR_X_SERVER_KEY` | 服务端身份密钥 |
+| 基础 | `serverKey` | `REPLACE_WITH_YOUR_X_SERVER_KEY` | 存量旧密钥，作为 `X-Server-Key` 请求头；仅在 apiId/apiKey 未成套配置时回退使用 |
+|  | `apiId` | `REPLACE_WITH_YOUR_API_ID` | API 调用标识（如 `mc_login_1`），作为 `X-Api-Id` 请求头；必须为 `mc_login` 用途且与 `apiKey` 同一所有者 |
+|  | `apiKey` | `REPLACE_WITH_YOUR_API_KEY` | 与 `apiId` 配套的密钥，作为 `X-Api-Key` 请求头；必须与 `apiId` 成套配置才能启用成套鉴权模式 |
 |  | `gracePeriodSeconds` | `15` | 进服宽限期（秒）。`-1`=关闭，`0`=立即限制 |
 |  | `loginTimeoutSeconds` | `300` | 未登录超时踢出（秒）。`0`=不限制 |
 |  | `sessionTimeoutSeconds` | `1800` | 会话保留时限（秒），仅对离线玩家生效：在线玩家绝不因 session 超时被踢；退出游戏后开始计时，时限内重连自动恢复登录，超过后需重新输入凭证。`0`=不限制 |
@@ -427,7 +449,7 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 - **登出流程**：先快照当前位置 / 物品 → 通知客户端重置 → 传送回 Limbo。下次登录会回到登出前位置。登出后未登录超时与宽限期从登出时刻重新起算，不会被立即踢出。
 - **登录状态一致性**：客户端本地认证状态仅由真正的"登录成功"结果置位（PIN 放行 / 密码登录成功 / 持久会话自动恢复 / 管理员强行登录）；注册、改密、重复登录拒绝等结果只展示不改变状态；登出统一由 `s2c_logout` 通道重置双端状态；玩家（重）进服时客户端自动清零本地状态，避免残留旧状态导致误拦登录。
 - **防多开**：同一 IQCL 账号 / 同一 UUID 在新设备登录时，旧连接被踢下线。
-- **game-session 通知**：登录调用 `POST /api/game-session/login`，登出 / 断线调用 `POST /api/game-session/logout`，请求头携带 `X-Server-Key`，请求体包含 `mcUUID` 与可选 `username`。
+- **game-session 通知**：登录调用 `POST /api/game-session/login`，登出 / 断线调用 `POST /api/game-session/logout`，请求头鉴权与 verify-pin 一致（优先 `X-Api-Id` + `X-Api-Key` 成套模式，回退 `X-Server-Key`），请求体包含 `mcUUID` 与可选 `username`。
 - **爆破防护**：5 次失败后锁定 5 分钟，指数退避封顶 1 小时。
 - **重复登录拦截**：登录成功后再次执行登录命令在客户端与服务端双层拦截；拒绝结果以失败状态回传，不会被客户端误判为登录成功。
 - **IQCL 账号绑定**：绑定逻辑由 IQCL 后端接管，本地不存储 UUID↔displayId 关系。PIN 登录成功后自动展示绑定信息，可在 [IQCL 安全中心](https://www.iqcl.de5.net/auth/user/) 查看或解绑。若后端返回 UUID 绑定冲突（MC UUID 已绑定其他用户），模组会显示友好提示。
@@ -443,10 +465,12 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 ```
 POST /api/verify-pin
 Content-Type: application/json
-X-Server-Key: <配置的 serverKey>
+# 鉴权（API 文档 2.3 节，按优先级）：
+#   优先：X-Api-Id: <配置的 apiId>  +  X-Api-Key: <配置的 apiKey>   （成套模式）
+#   回退：X-Server-Key: <配置的 serverKey>                            （存量旧密钥）
 ```
 
-请求体（客户端构造的完整密文包，原样转发）：
+请求体（客户端构造的完整密文包，MC 服务端原样转发，不插入任何字段）：
 
 ```json
 {
@@ -463,6 +487,8 @@ X-Server-Key: <配置的 serverKey>
 {"pin":"ABCD-EFGH-JKLM","bindTarget":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}
 ```
 
+> `bindTarget` 即 PIN 绑定的 MC 玩家 UUID（用户生成 PIN 时填写），服务器解密后与 `temp_pin.bind_target` 严格相等比较。
+
 ### 响应（验证服务器 → MC 服务端）
 
 ```json
@@ -470,24 +496,44 @@ X-Server-Key: <配置的 serverKey>
   "success": true,
   "serverTs": 1785665824123,
   "payload": {
-    "permission": "default",
-    "playerName": "Notch",
-    "expireAt": 1798761600000
+    "v": 1,
+    "ts": 1785665824123,
+    "nonce": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    "displayId": 1024,
+    "username": "Steve",
+    "permission": "formal",
+    "mcUUID": "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+    "pinFingerprint": "5e884898da2804715"
   },
   "signature": "<base64 编码的 64 字节 Ed25519 签名>"
 }
 ```
 
+**payload 字段**（API 文档 2.6 节）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `v` | number | 协议版本 `1` |
+| `ts` | number | 服务器时间戳（与 `serverTs` 一致） |
+| `nonce` | string | 服务器新生成的 32 位随机串，供下行防重放 |
+| `displayId` | number \| null | 用户显示 ID |
+| `username` | string \| null | 用户名 |
+| `permission` | string | 权限等级：`trial` / `formal` / `banned` |
+| `mcUUID` | string | PIN 绑定的 MC 玩家 UUID（回显，供服务端核对） |
+| `pinFingerprint` | string | PIN 的 SHA-256 前 16 位 hex（不泄露 PIN 明文） |
+
 **签名规则**：对 `payload` 对象执行规范化 JSON 序列化（key 字典序升序、无多余空格、无换行）后，用 Ed25519 私钥对 UTF-8 字节签名。
 
-MC 服务端使用硬编码 Ed25519 公钥验签，验签失败直接拒绝登录。
+MC 服务端使用硬编码 Ed25519 公钥验签，验签失败直接拒绝登录。验签成功后额外检查：`permission` 为 `banned` 拒绝；`mcUUID` 回显与当前玩家 UUID 不一致拒绝。
 
 ### game-session 接口
 
 ```
 POST /api/game-session/login     # 玩家登录成功时调用
 POST /api/game-session/logout    # 玩家登出 / 断线时调用
-Header: X-Server-Key: <serverKey>
+# 鉴权（与 verify-pin 一致，按优先级）：
+#   优先：X-Api-Id: <apiId>  +  X-Api-Key: <apiKey>   （成套模式）
+#   回退：X-Server-Key: <serverKey>                      （存量旧密钥）
 Body:  { "mcUUID": "<玩家UUID>", "username": "<可选，玩家名>" }
 ```
 

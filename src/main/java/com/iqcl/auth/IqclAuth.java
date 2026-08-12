@@ -68,6 +68,23 @@ public class IqclAuth implements ModInitializer {
         LOGGER.info("[IQCL Auth] 初始化（专用服务端）...");
 
         ModConfig.load();
+
+        // 配置完整性检查：apiId + apiKey 成套鉴权（API 文档 2.3 节）
+        ModConfig loadedConfig = ModConfig.get();
+        boolean apiIdConfigured = loadedConfig.apiId != null && !loadedConfig.apiId.isEmpty()
+                && !loadedConfig.apiId.startsWith("REPLACE_WITH");
+        boolean apiKeyConfigured = loadedConfig.apiKey != null && !loadedConfig.apiKey.isEmpty()
+                && !loadedConfig.apiKey.startsWith("REPLACE_WITH");
+        if (apiIdConfigured && apiKeyConfigured) {
+            LOGGER.info("[IQCL Auth] 鉴权模式：apiId + apiKey 成套模式（X-Api-Id + X-Api-Key）");
+        } else if (apiIdConfigured || apiKeyConfigured) {
+            LOGGER.warn("[IQCL Auth] apiId/apiKey 未成套配置！成套模式需同时提供两者，"
+                    + "当前将回退使用 X-Server-Key。请在 config/iqclauth.json 中补全 apiId 和 apiKey");
+        } else {
+            LOGGER.warn("[IQCL Auth] apiId/apiKey 均未配置，将回退使用 X-Server-Key 鉴权（存量旧密钥兼容模式）。"
+                    + "建议在 config/iqclauth.json 中配置 mc_login 用途的 apiId + apiKey 以启用成套鉴权");
+        }
+
         CommandRegistry.register();
         ServerNetworkHandler.register();
         PlayerRestrictionManager.register();

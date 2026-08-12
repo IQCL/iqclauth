@@ -240,9 +240,9 @@ gradlew.bat build
 
 凭证获取流程：
 
-1. 在 **[IQCL | 工单中心](https://www.iqcl.de5.net/tickets/)** 提交工单，填入服务器信息及能证明你是所有人的详尽材料；
-2. 等待审核通过；
-3. 在 **[IQCL | 用户中心](https://www.iqcl.de5.net/auth/user/#pin)** 中兑换 API 调用凭证（成套的 `apiId` + `apiKey`，或存量 `serverKey`）；
+1. 在 **[IQCL | API 中心](https://www.iqcl.de5.net/developer/)**（官网页脚点击"开发者"或"API 管理"）申请 API 调用凭证（成套的 `apiId` + `apiKey`，或存量 `serverKey`）；
+2. 若需走工单审核，请在 **[IQCL | 工单中心](https://www.iqcl.de5.net/tickets/)** 提交工单，填入服务器信息及能证明你是所有人的详尽材料；
+3. 等待审核通过，在 **[IQCL | API 中心](https://www.iqcl.de5.net/developer/)** 查看并复制你的凭证；
 4. 填入 `config/iqclauth.json` 后重启服务端。
 
 字段说明：
@@ -366,7 +366,7 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 3. 服务端转发至 `https://www.iqcl.de5.net/api/verify-pin`；
 4. 服务端对响应执行 Ed25519 验签后回传客户端；
 5. 聊天框显示 `[IQCL] PIN 验证成功，登录已放行` 或失败信息；
-6. PIN 登录成功后若返回 displayId，自动显示绑定信息（可在 IQCL 安全中心查看或解绑）。
+6. PIN 登录成功后若返回 displayId，自动显示绑定信息（可在 IQCL 安全中心（用户中心进入）查看或解绑）。
 
 #### 3.2 密码登录（本服本地验证）
 
@@ -452,7 +452,7 @@ public static final String GAME_SESSION_LOGOUT_URL = "https://www.iqcl.de5.net/a
 - **game-session 通知**：登录调用 `POST /api/game-session/login`，登出 / 断线调用 `POST /api/game-session/logout`，请求头鉴权与 verify-pin 一致（优先 `X-Api-Id` + `X-Api-Key` 成套模式，回退 `X-Server-Key`），请求体包含 `mcUUID` 与可选 `username`。
 - **爆破防护**：5 次失败后锁定 5 分钟，指数退避封顶 1 小时。
 - **重复登录拦截**：登录成功后再次执行登录命令在客户端与服务端双层拦截；拒绝结果以失败状态回传，不会被客户端误判为登录成功。
-- **IQCL 账号绑定**：绑定逻辑由 IQCL 后端接管，本地不存储 UUID↔displayId 关系。PIN 登录成功后自动展示绑定信息，可在 [IQCL 安全中心](https://www.iqcl.de5.net/auth/user/) 查看或解绑。若后端返回 UUID 绑定冲突（MC UUID 已绑定其他用户），模组会显示友好提示。
+- **IQCL 账号绑定**：绑定逻辑由 IQCL 后端接管，本地不存储 UUID↔displayId 关系。PIN 登录成功后自动展示绑定信息，可在 [IQCL 安全中心](https://www.iqcl.de5.net/auth/user/#security)（用户中心进入）查看或解绑。若后端返回 UUID 绑定冲突（MC UUID 已绑定其他用户），模组会显示友好提示。
 - **`/iqcl link`**：引导玩家通过 PIN 登录绑定 IQCL 账号，按当前登录方式分三种行为：
   - 未登录 → 提示使用 `/iqcl login pin` 登录；
   - 已通过 PIN 登录（会话内有 displayId）→ 展示当前绑定信息，不登出；
@@ -574,8 +574,10 @@ Body:  { "mcUUID": "<玩家UUID>", "username": "<可选，玩家名>" }
 | --- | --- |
 | 官方站点 / 主页 | <https://www.iqcl.de5.net> |
 | GitHub 仓库 | <https://github.com/IQCL/iqclauth> |
-| 工单中心（申请 serverKey） | <https://www.iqcl.de5.net/tickets/> |
-| 用户中心（兑换 serverKey / 管理 PIN） | <https://www.iqcl.de5.net/auth/user/#pin> |
+| 工单中心（申请 API 凭证 ） | <https://www.iqcl.de5.net/tickets/> |
+| 用户中心（兑换凭证 / 进入安全中心） | <https://www.iqcl.de5.net/auth/user/> |
+| API 中心（兑换/查看 apiId + apiKey 成套凭证） | <https://www.iqcl.de5.net/api-center/> |
+| 安全中心（查看/解绑账号关联） | <https://www.iqcl.de5.net/auth/user/#security> |
 | PIN 验证 API | `https://www.iqcl.de5.net/api/verify-pin` |
 | Game Session API | `https://www.iqcl.de5.net/api/game-session/login`、`/api/game-session/logout` |
 | Issue 反馈 | <https://github.com/IQCL/iqclauth/issues> |
